@@ -61,6 +61,7 @@ class FootballAPIService:
             cache_manager.set(cache_key, data)
         
         return data
+    
     def get_fixture_by_id(self, fixture_id: int) -> Dict[str, Any]:
         """Obtiene un partido específico por ID"""
         url = f"{self.BASE_URL}/fixtures?id={fixture_id}"
@@ -159,3 +160,29 @@ class FootballAPIService:
             "estado": status["long"],
             "minuto": status["elapsed"]
         }
+    def get_fixtures_by_date(self, fecha: str, timezone: str = None):
+        """
+        Obtiene todos los partidos programados para una fecha específica.
+
+        Parámetros:
+        - fecha: string, formato YYYY-MM-DD
+        - timezone: string opcional, ejemplo "Europe/London"
+        """
+        url = f"{self.BASE_URL}/fixtures"
+        headers = {
+            "x-apisports-key": self.api_key
+        }
+        params = {
+            "date": fecha
+        }
+        if timezone:
+            params["timezone"] = timezone
+
+        response = requests.get(url, headers=headers, params=params)
+
+        if response.status_code != 200:
+            # Retornar vacío en caso de error
+            return {"results": 0, "response": []}
+
+        data = response.json()
+        return data

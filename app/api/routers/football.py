@@ -18,7 +18,6 @@ router = APIRouter(prefix="/football", tags=["Football Live Data"])
 def get_football_service() -> FootballAPIService:
     """Dependency para obtener el servicio de fútbol"""
     settings = get_settings()
-    # Asegúrate de agregar FOOTBALL_API_KEY a tu config
     api_key = getattr(settings, 'FOOTBALL_API_KEY', "0e88fe12ff5324e08d0dd7b35659829e")
     return FootballAPIService(api_key)
 
@@ -46,6 +45,70 @@ async def get_live_matches(
         matches.append(match_info)
     
     return {"total": len(matches), "matches": matches}
+@router.get("/fixture-by-date-teams")
+async def get_fixture_by_date_and_teams(
+    fecha: str = Query(..., description="Fecha del partido (YYYY-MM-DD)"),
+    local: str = Query(..., description="Nombre parcial del equipo local"),
+    visitante: str = Query(..., description="Nombre parcial del equipo visitante"),
+    service: FootballAPIService = Depends(get_football_service)
+):
+    """
+    Busca un fixture por fecha y por los nombres de los equipos.
+
+    - **fecha**: Fecha del partido (YYYY-MM-DD)
+    - **local**: Nombre (parcial) del equipo local
+    - **visitante**: Nombre (parcial) del equipo visitante
+    """
+
+    data = service.get_fixtures_by_date(fecha)
+    
+    if data.get("results", 0) == 0:
+        raise HTTPException(404, f"No hay partidos programados para la fecha {fecha}")
+    
+
+    for match in data["response"]:
+        home_name = match["teams"]["home"]["name"].lower()
+        away_name = match["teams"]["away"]["name"].lower()
+        if local.lower() in home_name and visitante.lower() in away_name:
+            return {
+                "fixture_id": match["fixture"]["id"],
+                "local": match["teams"]["home"]["name"],
+                "visitante": match["teams"]["away"]["name"],
+                "liga": match["league"]["name"],
+                "fecha": match["fixture"]["date"],
+                "estado": match["fixture"]["status"]["long"],
+                "minuto": match["fixture"]["status"]["elapsed"]
+            }
+    
+    raise HTTPException(404, f"No se encontró un partido entre {local} y {visitante} en la fecha {fecha}")
+
+@router.get("/fixtures-by-date")
+async def get_fixtures_by_date(
+    fecha: str = Query(..., description="Fecha de los partidos en formato YYYY-MM-DD"),
+    service: FootballAPIService = Depends(get_football_service)
+):
+    """
+    Devuelve todos los partidos programados para una fecha específica.
+
+    - **fecha**: Fecha de los partidos (YYYY-MM-DD)
+    """
+    data = service.get_fixtures_by_date(fecha)
+    
+    if data.get("results", 0) == 0:
+        raise HTTPException(404, f"No hay partidos programados para la fecha {fecha}")
+
+    resultados = []
+    for match in data["response"]:
+        resultados.append({
+            "fixture_id": match["fixture"]["id"],
+            "local": match["teams"]["home"]["name"],
+            "visitante": match["teams"]["away"]["name"],
+            "liga": match["league"]["name"],
+            "fecha": match["fixture"]["date"],
+            "estado": match["fixture"]["status"]["long"]
+        })
+
+    return {"total": len(resultados), "partidos": resultados}
 
 @router.get("/match/{fixture_id}", response_model=MatchInfo)
 async def get_match_detail(
@@ -457,7 +520,7 @@ async def get_complete_match_info(
     ### Ejemplo:
     - `/football/match-complete/215662`
     """
-    # 1. Información básica del partido
+
     match_data = service.get_fixture_by_id(fixture_id)
     
     if match_data.get("results", 0) == 0:
@@ -471,7 +534,7 @@ async def get_complete_match_info(
     status = fixture["status"]
     events = match.get("events", [])
     
-    # 2. Estadísticas
+  
     stats_data = service.get_fixture_statistics(fixture_id)
     estadisticas = {}
     for equipo_stats in stats_data:
@@ -480,7 +543,7 @@ async def get_complete_match_info(
             s["type"]: s["value"] for s in equipo_stats["statistics"]
         }
     
-    # 3. Eventos
+    
     eventos = [{
         "minuto": e["time"]["elapsed"],
         "equipo": e["team"]["name"],
@@ -489,7 +552,7 @@ async def get_complete_match_info(
         "detalle": e["detail"]
     } for e in events]
     
-    # 4. Alineaciones (opcional, pueden no estar disponibles)
+
     lineups_data = service.get_fixture_lineups(fixture_id)
     lineups = []
     

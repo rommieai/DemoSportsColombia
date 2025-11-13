@@ -70,10 +70,10 @@ async def get_player_profile(
     if not profile:
         raise HTTPException(404, f"Jugador con ID {player_id} no encontrado")
     
-    # Extraer información del perfil
+
     player_data = profile.get("player", {})
     
-    # Intentar obtener equipo actual de las estadísticas recientes
+
     current_team = None
     position = None
     
