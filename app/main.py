@@ -18,7 +18,7 @@ def create_app() -> FastAPI:
     app.include_router(analyze.router)
     app.include_router(health.router)
     app.include_router(ask.router)
-    app.include_router(validate.router)
+    #app.include_router(validate.router)
     app.include_router(football.router)
     app.include_router(products.router)
     app.include_router(players.router)
@@ -42,24 +42,24 @@ def create_app() -> FastAPI:
     
     @app.on_event("startup")
     async def startup_event():
-        print("🚀 Iniciando Complete Soccer Analysis API v2.0...")
-        print("📦 Pre-cargando modelos...")
+        print("Iniciando Complete Soccer Analysis API v2.0...")
+        print("Pre-cargando modelos...")
         
         try:
             from app.api.deps import analysis_service
             service = analysis_service()
             
-            print(f"✅ Modelos cargados:")
+            print(f"Modelos cargados:")
             print(f"  - Reconocimiento facial: {service.face_rec.loaded}")
             print(f"  - Jersey Detector (YOLO): {service.jersey_det.yolo is not None}")
         except Exception as e:
-            print(f"⚠️  Error cargando modelos ML: {str(e)}")
-            print("⚠️  Los modelos ML pueden no estar disponibles")
+            print(f"Error cargando modelos ML: {str(e)}")
+            print("Los modelos ML pueden no estar disponibles")
         
-        print("⚽ API de fútbol en vivo disponible en /football")
-        print("🛍️  API de productos de jugadores disponible en /products")
-        print("📊 API de estadísticas de jugadores disponible en /players")
-        print("🎉 Sistema listo!")
+        print("API de fútbol en vivo disponible en /football")
+        print("API de productos de jugadores disponible en /products")
+        print("API de estadísticas de jugadores disponible en /players")
+        print("Sistema listo!")
     
     return app
 

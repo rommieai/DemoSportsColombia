@@ -1,6 +1,9 @@
 """Endpoints para información y estadísticas de jugadores"""
 from fastapi import APIRouter, HTTPException, Query, Depends
 from typing import Optional, List
+from app.core.config import get_settings
+
+import openai
 from app.schemas.players import (
     PlayerDetailResponse,
     PlayerStatsFullResponse,
@@ -81,6 +84,35 @@ async def get_player_profile(
         "photo_url": service.get_player_photo_url(player_id)
     }
 
+@router.get("/news")
+async def get_player_news(
+    name: str = Query(..., min_length=3, description="Nombre completo del jugador"),
+):
+    """
+    Obtiene una noticia o dato curioso reciente sobre un jugador de fútbol.
+    
+    - **name**: Nombre completo del jugador
+    - **Respuesta**: Un párrafo muy corto con un dato interesante reciente
+    """
+    settings = get_settings()
+    openai.api_key = settings.OPENAI_API_KEY
+
+    prompt = (
+        f"Escribe un párrafo muy breve sobre una noticia o dato curioso reciente "
+        f"del jugador de fútbol {name}. Manténlo en máximo 3-4 líneas, estilo informativo y conciso."
+    )
+
+    try:
+        response = openai.chat.completions.create(
+            model=settings.OPENAI_MODEL_ID,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=100,
+            temperature=0.7
+        )
+        content = response.choices[0].message.content.strip()
+        return {"player": name, "news": content}
+    except Exception as e:
+        return {"error": "No se pudo generar la noticia", "detail": str(e)}
 @router.get("/search")
 async def search_players(
     name: str = Query(..., min_length=3, description="Apellido del jugador (mínimo 3 caracteres)"),
