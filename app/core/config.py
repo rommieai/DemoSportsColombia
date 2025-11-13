@@ -41,7 +41,8 @@ class Settings(BaseSettings):
         "http://127.0.0.1:5173",
         "https://demo-world-cup-ts.kontent-dev.com",
     ]
-
+    FOOTBALL_API_KEY: str = "0e88fe12ff5324e08d0dd7b35659829e"
+    
     # Configuración de pydantic v2
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import get_settings
-from app.api.routers import analyze, health, ask, validate
+from app.api.routers import analyze, health, ask, validate, football, products, players  
 
 def create_app() -> FastAPI:
     s = get_settings()
@@ -18,31 +18,48 @@ def create_app() -> FastAPI:
     app.include_router(analyze.router)
     app.include_router(health.router)
     app.include_router(ask.router)
-    app.include_router(validate.router)  # NUEVO: Endpoints de validación
-
+    app.include_router(validate.router)
+    app.include_router(football.router)
+    app.include_router(products.router)
+    app.include_router(players.router)
+    
     @app.get("/")
     def root():
         return {
             "message": "Complete Soccer Analysis API",
             "version": "2.0.0",
-            "endpoints": ["/analyze", "/health", "/ask", "/docs"],
+            "endpoints": [
+                "/analyze", 
+                "/health", 
+                "/ask", 
+                "/validate", 
+                "/football", 
+                "/products",
+                "/players",
+                "/docs"
+            ],
         }
     
-    # NUEVO: Pre-carga de modelos al iniciar la aplicación
     @app.on_event("startup")
     async def startup_event():
-        print(" Iniciando Complete Soccer Analysis API v2.0...")
-        print(" Pre-cargando modelos...")
+        print("🚀 Iniciando Complete Soccer Analysis API v2.0...")
+        print("📦 Pre-cargando modelos...")
         
-        # Esto fuerza la carga de los modelos en el @lru_cache
-        from app.api.deps import analysis_service
-        service = analysis_service()
+        try:
+            from app.api.deps import analysis_service
+            service = analysis_service()
+            
+            print(f"✅ Modelos cargados:")
+            print(f"  - Reconocimiento facial: {service.face_rec.loaded}")
+            print(f"  - Jersey Detector (YOLO): {service.jersey_det.yolo is not None}")
+        except Exception as e:
+            print(f"⚠️  Error cargando modelos ML: {str(e)}")
+            print("⚠️  Los modelos ML pueden no estar disponibles")
         
-        print(f" Modelos cargados:")
-        print(f"  - Reconocimiento facial: {service.face_rec.loaded}")
-        print(f"  - Goal Classifier: {service.goal_clf.model is not None}")
-        print(f"  - Jersey Detector (YOLO): {service.jersey_det.yolo is not None}")
-        print(" Sistema listo!")
+        print("⚽ API de fútbol en vivo disponible en /football")
+        print("🛍️  API de productos de jugadores disponible en /products")
+        print("📊 API de estadísticas de jugadores disponible en /players")
+        print("🎉 Sistema listo!")
     
     return app
 

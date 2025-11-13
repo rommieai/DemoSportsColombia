@@ -1,7 +1,9 @@
 import numpy as np, torch
 from PIL import Image
 from transformers import CLIPProcessor, CLIPModel
-from tensorflow.keras.models import load_model
+import torch
+from transformers import CLIPProcessor, CLIPModel
+
 
 class GoalNoGoalClassifier:
     def __init__(self, model_path: str, labels_path: str, device: str = None):
