@@ -9,7 +9,7 @@ import io
 import time
 
 from app.api.deps import analysis_service, match_validator
-from app.schemas.io import CompleteResponse
+from app.schemas.io import CompleteAnalysisResponse
 
 router = APIRouter(tags=["validate"])
 
@@ -23,7 +23,7 @@ class ValidateRequest(BaseModel):
 class ValidatedAnalysisResponse(BaseModel):
     """Respuesta del análisis con validación de eventos"""
     # Datos del análisis normal
-    analysis: CompleteResponse
+    analysis: CompleteAnalysisResponse
     
     # Validación contra eventos reales
     validation: dict

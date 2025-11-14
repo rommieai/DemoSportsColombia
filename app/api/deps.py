@@ -1,21 +1,33 @@
 from functools import lru_cache
 from app.core.config import get_settings
 from app.ml.faces.recognizer import FaceRecognizer
-from app.ml.classifiers.goal_clip_keras import GoalNoGoalClassifier
 from app.ml.detectors.jerseys import JerseyDetector
+from app.ml.detectors.time_ocr import TimeOCRDetector
 from app.services.analysis_service import AnalysisService
+from app.services.cache_service import AnalysisCacheService
 from app.services.match_events_service import MatchEventsService, MatchValidator
 
 @lru_cache
 def analysis_service() -> AnalysisService:
-    """Servicio principal de análisis (ML)"""
+    """Servicio principal de análisis (ML) con procesamiento paralelo"""
     s = get_settings()
+    
+    # Componentes de ML
     face = FaceRecognizer(
         s.MLP_MODEL_PATH, s.SCALER_PATH, s.LABELS_JSON, pca_path=s.PCA_PATH
     )
-    goal = GoalNoGoalClassifier(s.GOAL_MODEL_PATH, s.GOAL_LABELS_PATH)
     jersey = JerseyDetector()
-    return AnalysisService(face, goal, jersey)
+    time_ocr = TimeOCRDetector(gpu=s.USE_GPU_OCR)
+    
+    # Servicio con procesamiento paralelo (3 workers: caras, camisetas, tiempo)
+    return AnalysisService(face, jersey, time_ocr, max_workers=3)
+
+
+@lru_cache
+def cache_service() -> AnalysisCacheService:
+    """Servicio de caché para resultados de análisis"""
+    s = get_settings()
+    return AnalysisCacheService(max_size=s.CACHE_MAX_SIZE)
 
 
 @lru_cache
