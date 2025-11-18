@@ -2,6 +2,8 @@
 from fastapi import APIRouter, HTTPException, Query, Depends
 from fastapi.responses import StreamingResponse
 from typing import Optional
+from app.core.config import get_settings
+import openai
 import asyncio
 import json
 from app.schemas.football import (
@@ -179,10 +181,45 @@ async def get_match_detail(
         "estadisticas": estadisticas
     }
 
+async def generate_ia_match_events(fixture_id: int):
+    settings = get_settings()
+    openai.api_key = settings.OPENAI_API_KEY
+
+    prompt = f"""
+        Genera un JSON que coincida con la estructura de /match-events/{fixture_id}:
+        {{
+          "fixture_id": {fixture_id},
+          "eventos": [
+            {{
+              "minuto": <minuto del evento>,
+              "equipo": "<Colombia o Australia>",
+              "jugador": "<nombre del jugador>",
+              "tipo": "<Goal|subst|Card>",
+              "detalle": "<detalle del evento>"
+            }}
+          ],
+          "total": <cantidad de eventos>
+        }}
+        Usa información **real** del partido amistoso entre Colombia y Australia del 18 de noviembre de 2025.
+        Incluye goles, sustituciones y tarjetas amarillas/rojas si ocurrieron.
+        Si el partido aún no ha empezado, devuelve una lista vacía en "eventos" y "total": 0.
+        Solo devuelve JSON válido, nada más.
+    """
+
+    response = openai.chat.completions.create(
+        model="gpt-5-mini",
+        messages=[{"role": "user", "content": prompt}]
+    )
+
+    content = response.choices[0].message.content
+    return json.loads(content)
+
+
 @router.get("/match-events/{fixture_id}", response_model=MatchEventsResponse)
 async def get_match_events(
     fixture_id: int,
-    service: FootballAPIService = Depends(get_football_service)
+    service: FootballAPIService = Depends(get_football_service),
+    use_ai_fallback: bool = True
 ):
     """
     Obtiene un snapshot de todos los eventos actuales del partido.
@@ -191,6 +228,16 @@ async def get_match_events(
     - **Uso**: Ideal para primera carga antes de conectarse al stream
     """
     eventos_raw = service.get_fixture_events(fixture_id)
+    if not eventos_raw and use_ai_fallback:
+        try:
+            print("Usando fallback de IA para generar eventos del partido...")
+            return await generate_ia_match_events(fixture_id)
+        except Exception as e:
+            # Manejo del error de manera controlada
+            raise HTTPException(
+                status_code=404,
+                detail=f"No se encontraron eventos para fixture {fixture_id} y fallback de IA falló: {str(e)}"
+            )
     eventos_norm = [service.normalize_event(e) for e in eventos_raw]
     eventos_norm.sort(key=lambda x: (x["minuto"] if x["minuto"] is not None else -1))
     
@@ -215,53 +262,52 @@ async def get_match_events(
 @router.get("/stream-events/{fixture_id}")
 async def stream_match_events(
     fixture_id: int,
-    poll_sec: float = Query(default=2.0, ge=0.5, le=10.0),
+    poll_sec: float = Query(default=10.0, ge=0.5, le=10.0),
     service: FootballAPIService = Depends(get_football_service)
 ):
-    """
-    Server-Sent Events: Stream de eventos nuevos en tiempo real.
-    
-    - **fixture_id**: ID del partido a seguir
-    - **poll_sec**: Intervalo de polling en segundos (0.5-10.0)
-    - **Formato**: SSE con eventos tipo 'ready', 'events' y 'error'
-    
-    ### Ejemplo de uso (JavaScript):
-```javascript
-    const eventSource = new EventSource('/football/stream-events/12345?poll_sec=2');
-    
-    eventSource.addEventListener('ready', (e) => {
-        console.log('Connected:', JSON.parse(e.data));
-    });
-    
-    eventSource.addEventListener('events', (e) => {
-        const data = JSON.parse(e.data);
-        console.log('New events:', data.nuevos);
-    });
-```
-    """
+
     async def event_generator():
-        # Inicializar baseline
-        if fixture_id not in cache_manager.get_last_events(fixture_id):
-            try:
-                base_raw = service.get_fixture_events(fixture_id)
-                base_norm = [service.normalize_event(e) for e in base_raw]
-                base_norm.sort(key=lambda x: (x["minuto"] if x["minuto"] is not None else -1))
-                cache_manager.set_last_events(fixture_id, base_norm)
-            except Exception:
-                cache_manager.set_last_events(fixture_id, [])
-        
-        # Notificar conexión establecida
+
+        # Baseline inicial
+        last_events = cache_manager.get_last_events(fixture_id)
+        if not last_events:  # ← FIX
+            raw = service.get_fixture_events(fixture_id)
+            norm = [service.normalize_event(e) for e in raw]
+            norm.sort(key=lambda x: x.get("minuto") or -1)
+
+            cache_api.set(f"events:{fixture_id}", norm)
+            cache_manager.set_last_events(fixture_id, norm)
+            baseline = norm[:]
+        else:
+            cached = cache_api.get(f"events:{fixture_id}")
+            norm = cached if cached is not None else last_events
+            baseline = last_events
+
+        # Notificación inicial
         yield f"event: ready\ndata: {json.dumps({'fixture_id': fixture_id, 'status': 'listening'})}\n\n"
-        
+
         while True:
             try:
-                eventos_raw = service.get_fixture_events(fixture_id)
-                eventos_norm = [service.normalize_event(e) for e in eventos_raw]
-                eventos_norm.sort(key=lambda x: (x["minuto"] if x["minuto"] is not None else -1))
-                
+                cached = cache_api.get(f"events:{fixture_id}")
+
+                if cached is not None:
+                    eventos_norm = cached
+                else:
+                    eventos_raw = service.get_fixture_events(fixture_id)
+                    eventos_norm = [service.normalize_event(e) for e in eventos_raw]
+                    eventos_norm.sort(key=lambda x: x.get("minuto") or -1)
+
+                    cache_api.set(f"events:{fixture_id}", eventos_norm)
+                    cache_manager.set_last_events(fixture_id, eventos_norm)
+                    baseline = eventos_norm[:]
+
+                # Detectar nuevos eventos
                 nuevos = service.diff_new_events(fixture_id, eventos_norm)
-                
+
                 if nuevos:
+                    cache_manager.set_last_events(fixture_id, eventos_norm)
+                    baseline = eventos_norm[:]
+
                     payload = [{
                         "minuto": e["minuto"],
                         "equipo": e["equipo"],
@@ -269,23 +315,28 @@ async def stream_match_events(
                         "tipo": e["tipo"],
                         "detalle": e["detalle"]
                     } for e in nuevos]
-                    
-                    yield f"event: events\ndata: {json.dumps({'fixture_id': fixture_id, 'nuevos': payload})}\n\n"
-            
+
+                    yield (
+                        "event: events\n"
+                        f"data: {json.dumps({'fixture_id': fixture_id, 'nuevos': payload})}\n\n"
+                    )
+
             except Exception as ex:
                 yield f"event: error\ndata: {json.dumps({'message': str(ex)})}\n\n"
-            
+
             await asyncio.sleep(poll_sec)
-    
+
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-            "X-Accel-Buffering": "no"  # Para Nginx
+            "X-Accel-Buffering": "no"
         }
     )
+
+
 
 @router.get("/find-fixture")
 async def find_fixture(

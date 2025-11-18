@@ -68,3 +68,25 @@ class CacheManager:
 
 # Instancia global del caché
 cache_manager = CacheManager()
+
+
+class TTLCache:
+    def __init__(self):
+        self.store = {}  # { key: (timestamp, value) }
+
+    def get(self, key):
+        if key not in self.store:
+            return None
+        
+        ts, value = self.store[key]
+        # 10 segundos de TTL
+        if time.time() - ts > 10:
+            return None  # expiró
+
+        return value
+
+    def set(self, key, value):
+        self.store[key] = (time.time(), value)
+
+
+cache_api = TTLCache()
