@@ -1,4 +1,4 @@
-"""Servicio de análisis con procesamiento paralelo - ACTUALIZADO para FaceNet"""
+"""Servicio de análisis con procesamiento paralelo - ACTUALIZADO para Colombia"""
 from __future__ import annotations
 
 from typing import List, Dict, Any, Optional
@@ -114,12 +114,12 @@ class AnalysisService:
             logger.error(traceback.format_exc())
             return [], elapsed
     
-    def _detect_jerseys(self, img_rgb: np.ndarray) -> tuple[List[JerseyDetection], int, int, float]:
+    def _detect_jerseys(self, img_rgb: np.ndarray) -> tuple[List[JerseyDetection], int, float]:
         """
         Detecta camisetas en la imagen
         
         Returns:
-            (lista de detecciones, contador Argentina, contador Francia, tiempo de ejecución)
+            (lista de detecciones, contador Colombia, tiempo de ejecución)
         """
         start_time = time.perf_counter()
         
@@ -130,19 +130,18 @@ class AnalysisService:
                 for j in jerseys_raw
             ]
             
-            argentina_count = sum(1 for j in jerseys if j.team == "Argentina")
-            france_count = sum(1 for j in jerseys if j.team == "France")
+            colombia_count = sum(1 for j in jerseys if j.team == "Colombia")
             
             elapsed = time.perf_counter() - start_time
             logger.debug(f"[JERSEYS] Detectadas {len(jerseys)} camisetas "
-                        f"(ARG: {argentina_count}, FRA: {france_count}) en {elapsed:.3f}s")
+                        f"(COL: {colombia_count}) en {elapsed:.3f}s")
             
-            return jerseys, argentina_count, france_count, elapsed
+            return jerseys, colombia_count, elapsed
             
         except Exception as e:
             elapsed = time.perf_counter() - start_time
             logger.error(f"[ERROR] Error en detección de camisetas: {e}")
-            return [], 0, 0, elapsed
+            return [], 0, elapsed
     
     def _detect_time(self, img_rgb: np.ndarray) -> tuple[Optional[str], float]:
         """
@@ -191,7 +190,7 @@ class AnalysisService:
         
         # Recoger resultados
         faces, face_time = future_faces.result()
-        jerseys, arg_count, fra_count, jersey_time = future_jerseys.result()
+        jerseys, col_count, jersey_time = future_jerseys.result()
         match_time, time_ocr_time = future_time.result()
         
         total_elapsed = time.perf_counter() - total_start
@@ -204,8 +203,7 @@ class AnalysisService:
             num_faces=len(faces),
             faces=faces,
             jerseys=jerseys,
-            argentina_count=arg_count,
-            france_count=fra_count,
+            colombia_count=col_count,
             match_time=match_time,
             image_processed=True,
             total_detections=len(faces) + len(jerseys),

@@ -10,10 +10,9 @@ class JerseyDetector:
     def __init__(self):
         self.yolo = None
         self.custom_classes = [
-            "Argentina jersey", "France jersey", 
-            "argentina soccer shirt", "france soccer shirt",
-            "blue white striped shirt", "blue shirt",
-            "celeste jersey", "navy blue jersey"
+            "Colombia jersey", "colombia soccer shirt",
+            "yellow jersey", "yellow soccer shirt",
+            "yellow sports shirt", "amarillo jersey"
         ]
         
         try:
@@ -23,14 +22,13 @@ class JerseyDetector:
             model = YOLOWorld(weights_path)
             self.yolo = model
             self.yolo.set_classes(self.custom_classes)
-            print("✓ YOLOWorld cargado correctamente")
+            print("✓ YOLOWorld cargado correctamente para camisetas de Colombia")
         except Exception as e:
             print(f"⚠ YOLOWorld no disponible: {e}")
             self.yolo = None
 
     def detect_with_yolo(self, image: np.ndarray) -> List[JerseyDetection]:
         """Detectar camisetas usando YOLOWorld de ultralytics"""
-        # CORREGIDO: ahora usa self.yolo en lugar de self.yolo_model
         if self.yolo is None:
             print("YOLOWorld no disponible")
             return []
@@ -56,13 +54,11 @@ class JerseyDetector:
                         if class_id < len(self.custom_classes):
                             class_name = self.custom_classes[class_id].lower()
                             
-                            if any(term in class_name for term in ["argentina", "celeste"]):
-                                team = "Argentina"
-                            elif any(term in class_name for term in ["france", "navy", "marine"]):
-                                team = "France"
+                            # Todas las detecciones son Colombia (amarillo)
+                            if any(term in class_name for term in ["colombia", "yellow", "amarillo"]):
+                                team = "Colombia"
                             else:
-                                center_x = (x1 + x2) / 2
-                                team = "Argentina" if center_x < image.shape[1] / 2 else "France"
+                                team = "Colombia"  # Por defecto Colombia
                             
                             detections.append(JerseyDetection(
                                 team=team,
@@ -82,36 +78,31 @@ class JerseyDetector:
             return []
 
     def detect_by_colors(self, image: np.ndarray) -> List[JerseyDetection]:
-        """Detectar camisetas por colores característicos - Método de backup robusto"""
+        """Detectar camisetas amarillas de Colombia por colores característicos"""
         detections = []
         height, width = image.shape[:2]
         
-        print("Ejecutando detección por colores...")
+        print("Ejecutando detección por colores (amarillo Colombia)...")
         
         hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
         
-        # ARGENTINA - Rangos para celeste característico
-        lower_celeste = np.array([85, 40, 40])
-        upper_celeste = np.array([125, 255, 255])
+        # COLOMBIA - Rangos para amarillo característico
+        # Amarillo brillante (como el de la selección Colombia)
+        lower_yellow1 = np.array([20, 100, 100])  # H: 20-30 (amarillo)
+        upper_yellow1 = np.array([30, 255, 255])
         
-        # FRANCIA - Rangos para azul marino y azul
-        lower_marino = np.array([100, 80, 30])
-        upper_marino = np.array([140, 255, 180])
+        # Amarillo más claro/dorado
+        lower_yellow2 = np.array([25, 50, 150])
+        upper_yellow2 = np.array([35, 255, 255])
         
-        lower_azul_claro = np.array([90, 60, 60])
-        upper_azul_claro = np.array([110, 255, 255])
+        mask_yellow1 = cv2.inRange(hsv, lower_yellow1, upper_yellow1)
+        mask_yellow2 = cv2.inRange(hsv, lower_yellow2, upper_yellow2)
+        mask_colombia = cv2.bitwise_or(mask_yellow1, mask_yellow2)
         
-        mask_argentina = cv2.inRange(hsv, lower_celeste, upper_celeste)
-        mask_france1 = cv2.inRange(hsv, lower_marino, upper_marino)
-        mask_france2 = cv2.inRange(hsv, lower_azul_claro, upper_azul_claro)
-        mask_france = cv2.bitwise_or(mask_france1, mask_france2)
-        
+        # Mejorar máscara con operaciones morfológicas
         kernel = np.ones((5,5), np.uint8)
-        mask_argentina = cv2.morphologyEx(mask_argentina, cv2.MORPH_CLOSE, kernel)
-        mask_argentina = cv2.morphologyEx(mask_argentina, cv2.MORPH_OPEN, kernel)
-        
-        mask_france = cv2.morphologyEx(mask_france, cv2.MORPH_CLOSE, kernel)
-        mask_france = cv2.morphologyEx(mask_france, cv2.MORPH_OPEN, kernel)
+        mask_colombia = cv2.morphologyEx(mask_colombia, cv2.MORPH_CLOSE, kernel)
+        mask_colombia = cv2.morphologyEx(mask_colombia, cv2.MORPH_OPEN, kernel)
         
         def process_contours(mask, team_name, min_area=800):
             contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -122,8 +113,10 @@ class JerseyDetector:
                 if area > min_area:
                     x, y, w, h = cv2.boundingRect(contour)
                     
+                    # Validar aspecto de camiseta (proporción ancho/alto razonable)
                     aspect_ratio = w / h
                     if 0.3 <= aspect_ratio <= 2.5:
+                        # Calcular confianza basada en área y posición
                         size_confidence = min(area / 15000.0, 1.0)
                         position_bonus = 1.0 if y < height * 0.7 else 0.8
                         final_confidence = min(size_confidence * position_bonus, 1.0)
@@ -136,10 +129,9 @@ class JerseyDetector:
             
             return team_detections
         
-        detections.extend(process_contours(mask_argentina, "Argentina"))
-        detections.extend(process_contours(mask_france, "France"))
+        detections.extend(process_contours(mask_colombia, "Colombia"))
         
-        print(f"Detección por colores completada: {len(detections)} camisetas")
+        print(f"Detección por colores completada: {len(detections)} camisetas de Colombia")
         return detections
 
     def detect(self, image: np.ndarray) -> List[JerseyDetection]:

@@ -28,20 +28,20 @@ def test_health():
     
     if response.status_code == 200:
         data = response.json()
-        print("✅ Servidor funcionando")
-        print(f"\n📊 Estado de Modelos:")
+        print(" Servidor funcionando")
+        print(f"\n Estado de Modelos:")
         for model, status in data["models"].items():
-            icon = "✅" if status else "❌"
+            icon = "SI" if status else "NO"
             print(f"  {icon} {model}: {status}")
         
-        print(f"\n💾 Caché:")
+        print(f"\n Caché:")
         cache = data.get("cache", {})
         print(f"  - Tamaño: {cache.get('size', 0)}/{cache.get('max_size', 50)}")
         print(f"  - Uso: {cache.get('usage_percent', 0):.1f}%")
         
         return True
     else:
-        print("❌ Servidor no disponible")
+        print(" Servidor no disponible")
         return False
 
 
@@ -50,10 +50,10 @@ def test_analyze_complete(image_path: str):
     print_separator("2. ANÁLISIS COMPLETO (Procesamiento Paralelo)")
     
     if not Path(image_path).exists():
-        print(f"❌ Imagen no encontrada: {image_path}")
+        print(f" Imagen no encontrada: {image_path}")
         return None
     
-    print(f"📸 Procesando: {image_path}")
+    print(f" Procesando: {image_path}")
     
     start_time = time.time()
     
@@ -69,8 +69,8 @@ def test_analyze_complete(image_path: str):
     if response.status_code == 200:
         data = response.json()
         
-        print(f"\n✅ Análisis completado en {elapsed:.3f}s")
-        print(f"\n📊 Resultados:")
+        print(f"\n Análisis completado en {elapsed:.3f}s")
+        print(f"\n Resultados:")
         print(f"  - Tiempo del partido: {data.get('match_time', 'No detectado')}")
         print(f"  - Caras detectadas: {data['num_faces']}")
         print(f"  - Camisetas ARG: {data['argentina_count']}")
@@ -78,7 +78,7 @@ def test_analyze_complete(image_path: str):
         print(f"  - Total detecciones: {data['total_detections']}")
         
         times = data.get('processing_times', {})
-        print(f"\n⏱️  Tiempos de Procesamiento:")
+        print(f"\n  Tiempos de Procesamiento:")
         print(f"  - Caras:      {times.get('faces', 0):.3f}s")
         print(f"  - Camisetas:  {times.get('jerseys', 0):.3f}s")
         print(f"  - Tiempo OCR: {times.get('time_ocr', 0):.3f}s")
@@ -86,7 +86,7 @@ def test_analyze_complete(image_path: str):
         
         return data
     else:
-        print(f"❌ Error: {response.status_code}")
+        print(f" Error: {response.status_code}")
         print(response.text)
         return None
 
@@ -96,10 +96,10 @@ def test_analyze_time(image_path: str):
     print_separator("3. ANÁLISIS CON CACHÉ")
     
     if not Path(image_path).exists():
-        print(f"❌ Imagen no encontrada: {image_path}")
+        print(f" Imagen no encontrada: {image_path}")
         return None
     
-    print(f"📸 Procesando: {image_path}")
+    print(f" Procesando: {image_path}")
     
     start_time = time.time()
     
@@ -117,13 +117,13 @@ def test_analyze_time(image_path: str):
         source = data.get('source', 'unknown')
         
         if source == "cache":
-            print(f"\n✅ ¡HIT DE CACHÉ! Resultado en {elapsed:.3f}s (instantáneo)")
-            print(f"   💾 Datos recuperados de caché")
+            print(f"\n ¡HIT DE CACHÉ! Resultado en {elapsed:.3f}s (instantáneo)")
+            print(f"    Datos recuperados de caché")
         else:
-            print(f"\n✅ Análisis nuevo completado en {elapsed:.3f}s")
-            print(f"   🔄 Datos guardados en caché")
+            print(f"\n Análisis nuevo completado en {elapsed:.3f}s")
+            print(f"    Datos guardados en caché")
         
-        print(f"\n📊 Resultados:")
+        print(f"\n Resultados:")
         print(f"  - Fuente: {source}")
         print(f"  - Tiempo del partido: {data['match_time']}")
         print(f"  - Caras: {data['num_faces']}")
@@ -131,11 +131,11 @@ def test_analyze_time(image_path: str):
         print(f"  - Camisetas FRA: {data['france_count']}")
         
         if data.get('processing_times'):
-            print(f"\n⏱️  Tiempos: {data['processing_times']}")
+            print(f"\n  Tiempos: {data['processing_times']}")
         
         return data
     else:
-        print(f"❌ Error: {response.status_code}")
+        print(f" Error: {response.status_code}")
         print(response.text)
         return None
 
@@ -149,24 +149,24 @@ def test_cache_stats():
     if response.status_code == 200:
         data = response.json()
         
-        print("📊 Estado del Caché:")
+        print(" Estado del Caché:")
         print(f"  - Elementos: {data['size']}/{data['max_size']}")
         print(f"  - Uso: {data['usage_percent']:.1f}%")
         
         if data['times_cached']:
-            print(f"\n⏰ Tiempos Almacenados:")
+            print(f"\n Tiempos Almacenados:")
             for i, t in enumerate(data['times_cached'][:10], 1):
                 print(f"  {i}. {t}")
             
             if len(data['times_cached']) > 10:
                 print(f"  ... y {len(data['times_cached']) - 10} más")
         
-        print(f"\n📌 Más viejo: {data['oldest_time']}")
-        print(f"📌 Más nuevo: {data['newest_time']}")
+        print(f"\n Más viejo: {data['oldest_time']}")
+        print(f" Más nuevo: {data['newest_time']}")
         
         return data
     else:
-        print(f"❌ Error: {response.status_code}")
+        print(f" Error: {response.status_code}")
         return None
 
 
@@ -174,10 +174,10 @@ def test_cache_hit_demo(image_path: str):
     """Demuestra el beneficio del caché procesando la misma imagen 2 veces"""
     print_separator("5. DEMOSTRACIÓN DE CACHÉ")
     
-    print("🎯 Procesando la misma imagen 2 veces para demostrar el caché\n")
+    print(" Procesando la misma imagen 2 veces para demostrar el caché\n")
     
     # Primera vez
-    print("📍 Intento 1 (nueva imagen):")
+    print(" Intento 1 (nueva imagen):")
     time1 = time.time()
     result1 = test_analyze_time(image_path)
     elapsed1 = time.time() - time1
@@ -188,7 +188,7 @@ def test_cache_hit_demo(image_path: str):
     time.sleep(1)
     
     # Segunda vez (debería ser instantánea si tiene el mismo tiempo)
-    print("\n📍 Intento 2 (misma imagen):")
+    print("\n Intento 2 (misma imagen):")
     time2 = time.time()
     result2 = test_analyze_time(image_path)
     elapsed2 = time.time() - time2
@@ -203,9 +203,9 @@ def test_cache_hit_demo(image_path: str):
     
     if result2['source'] == 'cache':
         speedup = elapsed1 / elapsed2
-        print(f"\n🚀 Aceleración: {speedup:.1f}x más rápido con caché!")
+        print(f"\n Aceleración: {speedup:.1f}x más rápido con caché!")
     else:
-        print("\n⚠️  Ambos fueron análisis nuevos (tiempos diferentes)")
+        print("\n  Ambos fueron análisis nuevos (tiempos diferentes)")
 
 
 def clear_cache():
@@ -216,36 +216,36 @@ def clear_cache():
     
     if response.status_code == 200:
         data = response.json()
-        print(f"✅ {data['message']}")
+        print(f" {data['message']}")
         print(f"   Elementos eliminados: {data['elements_removed']}")
     else:
-        print(f"❌ Error: {response.status_code}")
+        print(f" Error: {response.status_code}")
 
 
 def main():
     """Ejecuta todos los tests"""
-    print("\n" + "🎬" * 30)
+    print("\n" + "+" * 30)
     print("  SCRIPT DE PRUEBA - Sistema de Análisis v2.0")
-    print("🎬" * 30)
+    print("+" * 30)
     
     # 1. Health check
     if not test_health():
-        print("\n❌ Servidor no disponible. Asegúrate de que esté corriendo.")
+        print("\n Servidor no disponible. Asegúrate de que esté corriendo.")
         return
     
     # Solicitar ruta de imagen
-    print("\n📂 Por favor, proporciona una imagen de prueba:")
+    print("\n Por favor, proporciona una imagen de prueba:")
     image_path = input("   Ruta de la imagen: ").strip()
     
     if not image_path:
-        print("\n⚠️  No se proporcionó imagen. Usando ruta por defecto...")
+        print("\n  No se proporcionó imagen. Usando ruta por defecto...")
         image_path = "test_image.jpg"
     
     # 2. Análisis completo
     result = test_analyze_complete(image_path)
     
     if not result:
-        print("\n❌ No se pudo completar el análisis.")
+        print("\n No se pudo completar el análisis.")
         return
     
     # 3. Estadísticas de caché
@@ -264,8 +264,8 @@ def main():
         clear_cache()
         test_cache_stats()
     
-    print("\n✅ Pruebas completadas!")
-    print("\n💡 Tips:")
+    print("\n Pruebas completadas!")
+    print("\n Tips:")
     print("  - Usa /analyze-complete para análisis único")
     print("  - Usa /analyze-time para streams/videos (aprovecha caché)")
     print("  - Revisa /cache/stats para monitorear uso")
@@ -276,8 +276,8 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\n\n⚠️  Interrumpido por el usuario")
+        print("\n\n  Interrumpido por el usuario")
     except Exception as e:
-        print(f"\n❌ Error: {e}")
+        print(f"\n Error: {e}")
         import traceback
         traceback.print_exc()

@@ -6,7 +6,7 @@ from app.schemas.io import AskPayload
 router = APIRouter(tags=["ask"])
 
 SYSTEM_PROMPT = (
-    "Eres un comentarista deportivo especializado en la final del Mundial Qatar 2022 entre Argentina y Francia. "
+    "Eres un comentarista deportivo especializado en el partido de futbol masculino amistoso entre Colombia y Australia. "
     "Habla siempre en tiempo presente, como si el partido estuviera ocurriendo ahora mismo. "
     "Tus respuestas deben sonar emocionantes y narrativas, como un comentarista en vivo. "
     "Usa marcadores claros (por ejemplo, listas o subtítulos) para organizar la información. "

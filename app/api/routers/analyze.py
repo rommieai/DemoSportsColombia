@@ -1,4 +1,4 @@
-"""Router de análisis con procesamiento paralelo y caché inteligente"""
+"""Router de análisis con procesamiento paralelo y caché inteligente - Actualizado para Colombia"""
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from PIL import Image
 import io
@@ -33,7 +33,7 @@ def get_cache() -> AnalysisCacheService:
 @router.post("/analyze-complete", response_model=CompleteAnalysisResponse)
 async def analyze_complete(file: UploadFile = File(...)):
     """
-    Análisis completo con procesamiento paralelo: caras + camisetas + tiempo (OCR)
+    Análisis completo con procesamiento paralelo: caras + camisetas de Colombia + tiempo (OCR)
     
     - Procesa caras, camisetas y tiempo del partido en paralelo
     - Guarda el resultado en caché indexado por tiempo del partido
@@ -41,7 +41,7 @@ async def analyze_complete(file: UploadFile = File(...)):
     
     **Procesamiento paralelo:**
     - Thread 1: Detección y reconocimiento de caras
-    - Thread 2: Detección de camisetas (YOLO + colores)
+    - Thread 2: Detección de camisetas amarillas de Colombia (YOLO + colores)
     - Thread 3: OCR del tiempo del partido (EasyOCR)
     
     **Ejemplo de uso:**
@@ -70,8 +70,7 @@ async def analyze_complete(file: UploadFile = File(...)):
                 "num_faces": result.num_faces,
                 "faces": [f.model_dump() for f in result.faces],
                 "jerseys": [j.model_dump() for j in result.jerseys],
-                "argentina_count": result.argentina_count,
-                "france_count": result.france_count,
+                "colombia_count": result.colombia_count,
                 "total_detections": result.total_detections,
                 "image_processed": True
             }
@@ -153,8 +152,7 @@ async def analyze_time(file: UploadFile = File(...)):
                 num_faces=cached_result["num_faces"],
                 faces=cached_result["faces"],
                 jerseys=cached_result["jerseys"],
-                argentina_count=cached_result["argentina_count"],
-                france_count=cached_result["france_count"],
+                colombia_count=cached_result["colombia_count"],
                 image_processed=cached_result["image_processed"],
                 total_detections=cached_result["total_detections"],
                 processing_times=None  # No disponible desde caché
@@ -177,8 +175,7 @@ async def analyze_time(file: UploadFile = File(...)):
             "num_faces": complete_result.num_faces,
             "faces": [f.model_dump() for f in complete_result.faces],
             "jerseys": [j.model_dump() for j in complete_result.jerseys],
-            "argentina_count": complete_result.argentina_count,
-            "france_count": complete_result.france_count,
+            "colombia_count": complete_result.colombia_count,
             "total_detections": complete_result.total_detections,
             "image_processed": True
         }
@@ -193,8 +190,7 @@ async def analyze_time(file: UploadFile = File(...)):
             num_faces=complete_result.num_faces,
             faces=complete_result.faces,
             jerseys=complete_result.jerseys,
-            argentina_count=complete_result.argentina_count,
-            france_count=complete_result.france_count,
+            colombia_count=complete_result.colombia_count,
             image_processed=complete_result.image_processed,
             total_detections=complete_result.total_detections,
             processing_times=complete_result.processing_times

@@ -17,8 +17,7 @@ class CompleteAnalysisResponse(BaseModel):
     num_faces: int
     faces: List[FacePrediction]
     jerseys: List[JerseyDetection]
-    argentina_count: int
-    france_count: int
+    colombia_count: int  # Número de camisetas de Colombia detectadas
     match_time: Optional[str]  # Tiempo del partido en formato "M:SS" o "MM:SS"
     image_processed: bool
     total_detections: int
@@ -37,8 +36,7 @@ class CachedAnalysisResponse(BaseModel):
     num_faces: int
     faces: List[FacePrediction]
     jerseys: List[JerseyDetection]
-    argentina_count: int
-    france_count: int
+    colombia_count: int  # Número de camisetas de Colombia detectadas
     image_processed: bool
     total_detections: int
     processing_times: Optional[Dict[str, float]] = None  # Solo si es análisis nuevo
