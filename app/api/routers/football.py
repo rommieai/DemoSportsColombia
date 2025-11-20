@@ -1,9 +1,16 @@
 """Endpoints para datos de fútbol en vivo"""
-from fastapi import APIRouter, HTTPException, Query, Depends
+from fastapi import APIRouter, HTTPException, Query, Depends, FastAPI, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from typing import Optional
 from app.core.config import get_settings
 import openai
+from pydantic import BaseModel
+import hashlib
+from openai import OpenAI
+import time
+import os
+from app.tasks import refresh_match_data
+from app.cache_managerask import football_cache
 import asyncio
 import json
 from app.schemas.football import (
@@ -16,6 +23,13 @@ from app.core.config import get_settings
 from app.core.cache import cache_manager
 
 router = APIRouter(prefix="/football", tags=["Football Live Data"])
+openai.api_key = os.getenv("OPENAI_API_KEY") 
+
+class AskRequest(BaseModel):
+    question: str
+
+class CommentRequest(BaseModel):
+    match_id: int
 
 def get_football_service() -> FootballAPIService:
     """Dependency para obtener el servicio de fútbol"""
@@ -214,6 +228,22 @@ async def generate_ia_match_events(fixture_id: int):
     content = response.choices[0].message.content
     return json.loads(content)
 
+class TTLCache:
+    def __init__(self):
+        self.store = {}  # { key: (timestamp, value) }
+
+    def get(self, key):
+        if key not in self.store:
+            return None
+        ts, value = self.store[key]
+        if time.time() - ts > 10:  # 10 segundos de TTL
+            return None
+        return value
+
+    def set(self, key, value):
+        self.store[key] = (time.time(), value)
+
+cache_api = TTLCache()
 
 @router.get("/match-events/{fixture_id}", response_model=MatchEventsResponse)
 async def get_match_events(
@@ -227,24 +257,33 @@ async def get_match_events(
     - **fixture_id**: ID del partido
     - **Uso**: Ideal para primera carga antes de conectarse al stream
     """
-    eventos_raw = service.get_fixture_events(fixture_id)
-    if not eventos_raw and use_ai_fallback:
-        try:
-            print("Usando fallback de IA para generar eventos del partido...")
-            return await generate_ia_match_events(fixture_id)
-        except Exception as e:
-            # Manejo del error de manera controlada
-            raise HTTPException(
-                status_code=404,
-                detail=f"No se encontraron eventos para fixture {fixture_id} y fallback de IA falló: {str(e)}"
-            )
-    eventos_norm = [service.normalize_event(e) for e in eventos_raw]
-    eventos_norm.sort(key=lambda x: (x["minuto"] if x["minuto"] is not None else -1))
+
+    # Intentar obtener eventos desde cache
+    eventos_norm = cache_api.get(f"events:{fixture_id}")
     
-    # Actualizar caché
+    if eventos_norm is None:
+        # No estaba en cache, llamar a la API
+        eventos_raw = service.get_fixture_events(fixture_id)
+        if not eventos_raw and use_ai_fallback:
+            try:
+                print("Usando fallback de IA para generar eventos del partido...")
+                result = await generate_ia_match_events(fixture_id)
+                return result
+            except Exception as e:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"No se encontraron eventos para fixture {fixture_id} y fallback de IA falló: {str(e)}"
+                )
+
+        eventos_norm = [service.normalize_event(e) for e in eventos_raw]
+        eventos_norm.sort(key=lambda x: (x["minuto"] if x["minuto"] is not None else -1))
+
+        # Guardar en cache
+        cache_api.set(f"events:{fixture_id}", eventos_norm)
+
+    # Actualizar caché global de last_events
     cache_manager.set_last_events(fixture_id, eventos_norm)
-    
-    # Limpiar _key antes de responder
+
     resp = [{
         "minuto": e["minuto"],
         "equipo": e["equipo"],
@@ -252,74 +291,78 @@ async def get_match_events(
         "tipo": e["tipo"],
         "detalle": e["detalle"]
     } for e in eventos_norm]
-    
+
     return {
         "fixture_id": fixture_id,
         "eventos": resp,
         "total": len(resp)
     }
 
+import random
+
 @router.get("/stream-events/{fixture_id}")
 async def stream_match_events(
     fixture_id: int,
-    poll_sec: float = Query(default=10.0, ge=0.5, le=10.0),
+    poll_sec: float = Query(default=10.0, ge=10.0, le=10.0),
     service: FootballAPIService = Depends(get_football_service)
 ):
 
     async def event_generator():
 
-        # Baseline inicial
-        last_events = cache_manager.get_last_events(fixture_id)
-        if not last_events:  # ← FIX
-            raw = service.get_fixture_events(fixture_id)
-            norm = [service.normalize_event(e) for e in raw]
-            norm.sort(key=lambda x: x.get("minuto") or -1)
+        # Inicializar baseline
+        if fixture_id not in cache_manager.get_last_events(fixture_id):
+            try:
+                base_raw = service.get_fixture_events(fixture_id)
+                base_norm = [service.normalize_event(e) for e in base_raw]
+                base_norm.sort(key=lambda x: (x["minuto"] if x["minuto"] is not None else -1))
+                cache_manager.set_last_events(fixture_id, base_norm)
+            except Exception:
+                cache_manager.set_last_events(fixture_id, [])
 
-            cache_api.set(f"events:{fixture_id}", norm)
-            cache_manager.set_last_events(fixture_id, norm)
-            baseline = norm[:]
-        else:
-            cached = cache_api.get(f"events:{fixture_id}")
-            norm = cached if cached is not None else last_events
-            baseline = last_events
+        baseline = cache_manager.get_last_events(fixture_id)
 
-        # Notificación inicial
         yield f"event: ready\ndata: {json.dumps({'fixture_id': fixture_id, 'status': 'listening'})}\n\n"
 
         while True:
             try:
+                # Obtener eventos desde cache o backend
                 cached = cache_api.get(f"events:{fixture_id}")
-
                 if cached is not None:
                     eventos_norm = cached
                 else:
                     eventos_raw = service.get_fixture_events(fixture_id)
                     eventos_norm = [service.normalize_event(e) for e in eventos_raw]
                     eventos_norm.sort(key=lambda x: x.get("minuto") or -1)
-
                     cache_api.set(f"events:{fixture_id}", eventos_norm)
-                    cache_manager.set_last_events(fixture_id, eventos_norm)
-                    baseline = eventos_norm[:]
 
-                # Detectar nuevos eventos
-                nuevos = service.diff_new_events(fixture_id, eventos_norm)
+                # Nuevos eventos
+                nuevos = [e for e in eventos_norm if e not in baseline]
 
                 if nuevos:
-                    cache_manager.set_last_events(fixture_id, eventos_norm)
-                    baseline = eventos_norm[:]
+                    payload = []
 
-                    payload = [{
-                        "minuto": e["minuto"],
-                        "equipo": e["equipo"],
-                        "jugador": e["jugador"],
-                        "tipo": e["tipo"],
-                        "detalle": e["detalle"]
-                    } for e in nuevos]
+                    for e in nuevos:
+                        item = {
+                            "minuto": e["minuto"],
+                            "equipo": e["equipo"],
+                            "jugador": e["jugador"],
+                            "tipo": e["tipo"],
+                            "detalle": e["detalle"]
+                        }
+
+                        # 🔥 NUEVA LÓGICA: si es tarjeta (Card), agregar apuesta random
+                        if e["tipo"] == "Card":
+                            item["apuesta"] = random.randint(1, 100)
+
+                        payload.append(item)
 
                     yield (
                         "event: events\n"
                         f"data: {json.dumps({'fixture_id': fixture_id, 'nuevos': payload})}\n\n"
                     )
+
+                    baseline = eventos_norm[:]
+                    cache_manager.set_last_events(fixture_id, baseline)
 
             except Exception as ex:
                 yield f"event: error\ndata: {json.dumps({'message': str(ex)})}\n\n"
@@ -335,6 +378,7 @@ async def stream_match_events(
             "X-Accel-Buffering": "no"
         }
     )
+
 
 
 
@@ -445,98 +489,94 @@ async def get_match_lineups(
 ):
     """
     Obtiene las alineaciones (lineups) de un partido.
-    
-    - **fixture_id**: ID del partido
-    - **Incluye**: 
-        - Formación táctica (ej: 4-4-2)
-        - Jugadores titulares (startXI) con posiciones en el campo
-        - Jugadores suplentes
-        - Información del entrenador
-        - Colores de camisetas
-    - **Caché**: 1 hora
-    
-    ### Información de posiciones:
-    - **pos**: G (Portero), D (Defensa), M (Mediocampista), F (Delantero)
-    - **grid**: Posición en cuadrícula (ej: "1:1" = fila 1, columna 1)
-    - **position.x/y**: Coordenadas para dibujar en canvas
-    
-    ### Ejemplo:
-    - `/football/lineups/215662` - Alineaciones de un partido específico
     """
-    # Obtener información básica del partido
+
+    POSITION_MAP = {
+        "G": "Portero",
+        "D": "Defensa",
+        "M": "Mediocampista",
+        "F": "Delantero"
+    }
+
+    def map_position(pos_letter: str):
+        if not pos_letter:
+            return "Desconocido"
+        return POSITION_MAP.get(pos_letter.upper(), "Desconocido")
+
+    # Obtener información del partido
     match_data = service.get_fixture_by_id(fixture_id)
-    
+
     if match_data.get("results", 0) == 0:
         raise HTTPException(404, "No se encontró el partido")
-    
+
     match = match_data["response"][0]
     teams = match["teams"]
-    
-    # Obtener lineups
+
+    # Obtener alineaciones
     lineups_data = service.get_fixture_lineups(fixture_id)
-    
+
     if not lineups_data:
         raise HTTPException(
-            404, 
+            404,
             "No hay alineaciones disponibles para este partido. "
-            "Las alineaciones solo están disponibles cuando el partido ha comenzado o está próximo a comenzar."
+            "Las alineaciones solo están disponibles cuando el partido ha comenzado "
+            "o está próximo a comenzar."
         )
-    
-    # Procesar lineups
+
     lineups_processed = []
     total_players = 0
-    
+
     for lineup in lineups_data:
         team = lineup.get("team", {})
         coach = lineup.get("coach", {})
-        formation = lineup.get("formation")
-        colors = lineup.get("colors", {})
-        
-        # Procesar jugadores titulares
+
+        # Titulares
         startXI = []
         for player_data in lineup.get("startXI", []):
             player = player_data.get("player", {})
+            pos_word = map_position(player.get("pos"))
+
             startXI.append({
                 "id": player.get("id"),
                 "name": player.get("name"),
                 "number": player.get("number"),
-                "pos": player.get("pos") or "Unknown"
-,
+                "pos": pos_word,
                 "grid": player.get("grid"),
                 "position": {
                     "x": player.get("x"),
                     "y": player.get("y")
-                } if player.get("x") is not None else None
+                } if player.get("x") is not None and player.get("y") is not None else None
             })
-        
-        # Procesar suplentes
+
+        # Suplentes
         substitutes = []
         for player_data in lineup.get("substitutes", []):
             player = player_data.get("player", {})
+            pos_word = map_position(player.get("pos"))
+
             substitutes.append({
                 "id": player.get("id"),
                 "name": player.get("name"),
                 "number": player.get("number"),
-                "pos": player.get("pos") or "Unknown"
-,
+                "pos": pos_word,
                 "grid": player.get("grid"),
                 "position": None
             })
-        
+
         total_players += len(startXI) + len(substitutes)
-        
+
         lineups_processed.append({
             "team_id": team.get("id"),
             "team_name": team.get("name"),
-            "formation": formation,
+            "formation": lineup.get("formation"),
             "coach_id": coach.get("id"),
             "coach_name": coach.get("name"),
             "coach_photo": coach.get("photo"),
-            "colors": colors,
+            "colors": lineup.get("colors", {}),
             "startXI": startXI,
             "substitutes": substitutes
         })
-    
+
     return {
         "fixture_id": fixture_id,
         "equipos": {
@@ -546,6 +586,7 @@ async def get_match_lineups(
         "lineups": lineups_processed,
         "total_players": total_players
     }
+
 
 
 @router.get("/match-complete/{fixture_id}")
@@ -660,4 +701,214 @@ async def get_complete_match_info(
         "estadisticas": estadisticas,
         "lineups": lineups,
         "lineups_disponibles": len(lineups) > 0
+    }
+
+@router.post("/ask/{match_id}")
+async def ask_commentator(match_id: int, req: AskRequest, background_tasks: BackgroundTasks):
+    # Lanza actualización en background (no bloquea)
+    background_tasks.add_task(refresh_match_data, match_id)
+
+    match_data = football_cache.get(match_id)
+
+    if not match_data:
+        # Si aún no hay datos, fuerza fetch inmediato
+        await refresh_match_data(match_id)
+        match_data = football_cache.get(match_id)
+
+    if not match_data:
+        return {"error": "No se pudo obtener información del partido."}
+
+    # Crear prompt estilo comentarista deportivo
+    prompt = f"""
+Actúa como un comentarista deportivo profesional.
+Usa exclusivamente la información de este partido para responder.
+
+Información del partido:
+{match_data}
+
+Pregunta del usuario: {req.question}
+
+Responde de forma clara, emocionante y precisa. Las respuestas no pueden tener mas de 70 palabras.
+"""
+
+    response = openai.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}]
+    )
+
+    return {
+        "answer": response.choices[0].message.content,
+        "match_context_used": True
+    }
+
+
+# Cache simple de comentarios para no repetir
+comment_cache = {}  # {match_id: hash_comentario}
+class TTLCommentCache:
+    def __init__(self, ttl_seconds=60):
+        self.store = {}  # { match_id: (timestamp, comentario_hash, comentario) }
+        self.ttl = ttl_seconds
+
+    def get(self, match_id):
+        if match_id not in self.store:
+            return None
+        ts, hash_comment, comentario = self.store[match_id]
+        if time.time() - ts > self.ttl:
+            del self.store[match_id]
+            return None
+        return comentario
+
+    def set(self, match_id, comentario):
+        hash_comment = hashlib.md5(comentario.encode()).hexdigest()
+        self.store[match_id] = (time.time(), hash_comment, comentario)
+
+    def get_last_hash(self, match_id):
+        if match_id not in self.store:
+            return None
+        return self.store[match_id][1]
+
+comment_cache_ttl = TTLCommentCache(ttl_seconds=60)
+@router.get("/commentary/{match_id}")
+async def get_match_commentary(match_id: int, background_tasks: BackgroundTasks):
+    """
+    Genera un comentario corto y relevante sobre el partido.
+    Cache de comentarios valido 60 segundos.
+    """
+    # Primero revisar cache
+    cached_comment = comment_cache_ttl.get(match_id)
+    if cached_comment:
+        current_data = football_cache.get(match_id)
+        return {
+            "minute": current_data.get("minuto") if current_data else None,
+            "commentary": cached_comment,
+            "from_cache": True
+        }
+
+    # Obtener estado actual
+    current_data = football_cache.get(match_id)
+    if not current_data:
+        from app.tasks import refresh_match_data
+        await refresh_match_data(match_id)
+        current_data = football_cache.get(match_id)
+
+    if not current_data:
+        raise HTTPException(404, "No se pudo obtener información del partido.")
+
+    # Últimos eventos
+    previous_events = cache_manager.get_last_events(match_id) or []
+    current_events = current_data.get("eventos", [])
+
+    # Actualizar cache de last_events
+    cache_manager.set_last_events(match_id, current_events)
+
+    # Crear prompt dinámico
+    prompt = f"""
+Eres un comentarista deportivo profesional.
+Genera **una frase corta y precisa** sobre el partido actual.
+Si hubo cambios respecto al minuto anterior, destácalos.
+Si no hubo cambios, genera un comentario relevante usando estadísticas, alineaciones o información de la liga.
+Datos previos:
+{previous_events}
+Datos actuales:
+{current_events}
+Datos adicionales del partido:
+Liga: {current_data.get('liga')}
+Equipos: {current_data['equipos']}
+Estadísticas: {current_data.get('estadisticas', {})}
+Lineups disponibles: {current_data.get('lineups_disponibles', False)}
+"""
+
+    # Llamada a OpenAI
+    response = openai.chat.completions.create(
+        model="gpt-5-mini",
+        messages=[{"role": "user", "content": prompt}]
+    )
+
+    commentary = response.choices[0].message.content.strip()
+
+    # Evitar repetir comentario anterior exacto
+    last_hash = comment_cache_ttl.get_last_hash(match_id)
+    hash_comment = hashlib.md5(commentary.encode()).hexdigest()
+    if hash_comment == last_hash:
+        commentary = "Continúa el partido sin novedades importantes."
+
+    # Guardar en cache TTL
+    comment_cache_ttl.set(match_id, commentary)
+
+    return {
+        "minute": current_data.get("minuto"),
+        "commentary": commentary,
+        "from_cache": False
+    }
+
+
+TRIVIA_CACHE = {}
+CACHE_DURATION = 60 * 60 * 2 # 2 horas
+
+class TriviaRequest(BaseModel):
+    team1: str
+    team2: str
+
+@router.post("/trivia")
+async def generate_trivia(payload: TriviaRequest):
+    settings = get_settings()
+    client = OpenAI(api_key=settings.OPENAI_API_KEY)
+
+    cache_key = f"{payload.team1.lower()}_{payload.team2.lower()}"
+    now = time.time()
+
+    # ---- CACHE CHECK ----
+    if cache_key in TRIVIA_CACHE:
+        entry = TRIVIA_CACHE[cache_key]
+        if entry["expires"] > now:
+            return {
+                "team1": payload.team1,
+                "team2": payload.team2,
+                "questions": entry["data"],
+                "from_cache": True
+            }
+
+    # ---- GENERATOR FOR SINGLE QUESTION ----
+    async def generate_single_question(team: str):
+        prompt = (
+            f"Genera UNA sola pregunta de trivia sobre datos curiosos del equipo {team}. "
+            f"Formato estricto JSON: "
+            f'{{"question": "texto de la pregunta", "answer": true/false}}. '
+            f"No agregues texto fuera del JSON. No listas, no explicaciones."
+        )
+
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}]
+        )
+
+        raw = response.choices[0].message.content.strip()
+
+        try:
+            data = json.loads(raw)
+        except:
+            # fallback mínimo
+            data = {"question": raw.replace("\n", " "), "answer": True}
+
+        return data
+
+    # ---- GENERATE 10 QUESTIONS ----
+    trivia_questions = []
+
+    for i in range(10):
+        current_team = payload.team1 if i % 2 == 0 else payload.team2
+        q = await generate_single_question(current_team)
+        trivia_questions.append(q)
+
+    # ---- SAVE TO CACHE ----
+    TRIVIA_CACHE[cache_key] = {
+        "expires": now + CACHE_DURATION,
+        "data": trivia_questions
+    }
+
+    return {
+        "team1": payload.team1,
+        "team2": payload.team2,
+        "questions": trivia_questions,
+        "from_cache": False
     }

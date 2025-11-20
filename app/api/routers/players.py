@@ -2,8 +2,12 @@
 from fastapi import APIRouter, HTTPException, Query, Depends
 from typing import Optional, List
 from app.core.config import get_settings
-
+from app.services.football_service import FootballAPIService
+from app.core.config import get_settings
+from pydantic import BaseModel
 import openai
+from datetime import datetime, timedelta
+from openai import OpenAI
 from app.schemas.players import (
     PlayerDetailResponse,
     PlayerStatsFullResponse,
@@ -18,6 +22,11 @@ from app.services.players_service import PlayersAPIService
 from app.core.config import get_settings
 
 router = APIRouter(prefix="/players", tags=["Players Statistics"])
+def get_football_service() -> FootballAPIService:
+    """Dependency para obtener el servicio de fútbol"""
+    settings = get_settings()
+    api_key = getattr(settings, 'FOOTBALL_API_KEY', "0e88fe12ff5324e08d0dd7b35659829e")
+    return FootballAPIService(api_key)
 
 def get_players_service() -> PlayersAPIService:
     """Dependency para obtener el servicio de jugadores"""
@@ -607,71 +616,184 @@ async def find_colombian_players(
             "ejemplo": "Usa: /players/find?name=James Rodriguez"
         }
 
-
 @router.get("/quick-stats")
 async def get_quick_stats(
     name: str = Query(..., min_length=3, description="Nombre del jugador"),
     season: Optional[int] = Query(None, description="Temporada (opcional, usa la más reciente si se omite)"),
+    nationality: Optional[str] = Query(None, description="Filtrar jugador por nacionalidad (opcional)"),
     service: PlayersAPIService = Depends(get_players_service)
 ):
     """
     ⚡ SUPER RÁPIDO: Busca jugador y retorna estadísticas en un solo paso.
-    
-    Este endpoint hace TODO automáticamente:
-    1. Busca el jugador por nombre
-    2. Obtiene sus estadísticas
-    3. Retorna resumen simple
-    
-    - **name**: Nombre del jugador
-    - **season**: Temporada opcional (usa la más reciente si se omite)
-    
-    ### Ejemplos:
-    - `/players/quick-stats?name=Mbappe`
-    - `/players/quick-stats?name=Haaland&season=2023`
-    - `/players/quick-stats?name=James Rodriguez&season=2022`
-    
-    ### Caso de uso:
-    Cuando no conoces el ID y quieres estadísticas rápidas
+    - Filtra por nacionalidad si se especifica.
+    - Usa ChatGPT como fallback si no se encuentra el jugador.
+    - NUNCA devuelve "Jugador no encontrado".
     """
-    # 1. Buscar jugador
-    search_data = service.search_players(name, page=1)
-    
-    if search_data.get("results", 0) == 0:
-        raise HTTPException(404, f"No se encontró ningún jugador con el nombre '{name}'")
-    
-    # Tomar el primer resultado
-    first_player = search_data["response"][0]
-    player_data = first_player.get("player", {})
+    settings = get_settings()
+    import openai, json, random
+    openai.api_key = settings.OPENAI_API_KEY
+
+    # ------------------------------
+    # 1. Buscar jugadores (raw)
+    # ------------------------------
+    search_data = service.search_players(name, page=1) or {}
+    raw_players = search_data.get("response") or search_data.get("players") or []
+
+    # ------------------------------
+    # 2. Validar entradas (asegurar player.id y player.name)
+    # ------------------------------
+    def is_valid_player_entry(entry):
+        if not isinstance(entry, dict):
+            return False
+        pl = entry.get("player") or {}
+        pid = pl.get("id")
+        pname = pl.get("name")
+        if pid is None:
+            return False
+        return isinstance(pname, str) and pname.strip() != ""
+
+    players_list = [p for p in raw_players if is_valid_player_entry(p)]
+
+    # ------------------------------
+    # 3. Filtrar por nacionalidad
+    # ------------------------------
+    if nationality:
+        nat = nationality.strip().lower()
+
+        def safe_nat(p):
+            return (p.get("player", {}).get("nationality") or "").strip().lower()
+
+        players_list = [p for p in players_list if safe_nat(p) == nat]
+
+    # ------------------------------
+    # 4. Fallback ChatGPT cuando NO hay jugadores encontrados
+    # ------------------------------
+    if len(players_list) == 0:
+        prompt = (
+            f"Genera un JSON completo con estadísticas ACTUALIZADAS y CORRECTAS de un jugador llamado '{name}'. "
+            f"Si el jugador real existe, usa información verificada, consistente y actualizada; "
+            f"si NO existe, invéntalo pero de forma coherente, realista y profesional.\n\n"
+
+            f"REQUISITOS DE CALIDAD DE LOS DATOS:\n"
+            f"- Cada campo debe contener información válida, actualizada y coherente.\n"
+            f"- No devuelvas valores antiguos, contradictorios, inventados sin lógica, "
+            f"ni información estadística imposible.\n"
+            f"- NO puedes usar null, vacíos, 'desconocido' ni placeholders.\n"
+            f"- Verifica que edad, estadísticas, minutos, goles, equipos y foto tengan sentido futbolístico.\n"
+            f"- Si inventas un jugador, inventa también un equipo y liga creíbles.\n\n"
+
+            f"FORMATO EXACTO DEL JSON:\n"
+            f"{{\n"
+            f"  \"jugador\": {{\n"
+            f"    \"id\": <numero>,\n"
+            f"    \"nombre\": \"<nombre>\",\n"
+            f"    \"nacionalidad\": \"<pais>\",\n"
+            f"    \"edad\": <numero>,\n"
+            f"    \"foto\": \"<url>\"\n"
+            f"  }},\n"
+            f"  \"temporada\": \"{season or '2024/2025'}\",\n"
+            f"  \"goles\": <numero>,\n"
+            f"  \"asistencias\": <numero>,\n"
+            f"  \"partidos\": <numero>,\n"
+            f"  \"minutos\": <numero>,\n"
+            f"  \"rating\": <numero>,\n"
+            f"  \"equipos\": [\n"
+            f"    {{\"nombre\": \"<equipo>\", \"liga\": \"<liga>\"}}\n"
+            f"  ]\n"
+            f"}}\n\n"
+
+            f"REGLAS:\n"
+            f"- Devuelve SIEMPRE un jugador válido (real o inventado).\n"
+            f"- NUNCA devuelvas texto fuera del JSON.\n"
+            f"- El JSON debe ser 100% válido, limpio y parseable.\n"
+        )
+
+
+        try:
+            response = openai.chat.completions.create(
+                model=settings.OPENAI_MODEL_ID,
+                messages=[
+                    {"role": "system", "content": "Responde únicamente JSON válido."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=350,
+                temperature=0.2
+            )
+
+            content = response.choices[0].message.content.strip()
+
+            if content.startswith("```"):
+                content = content.replace("```json", "").replace("```", "").strip()
+
+            parsed = json.loads(content)
+
+            return parsed  # ⬅️ SIEMPRE devuelve algo válido
+
+        except Exception:
+            # ⬅️ Fallback FINAL totalmente inventado, pero válido
+            return {
+                "jugador": {
+                    "id": random.randint(100000, 999999),
+                    "nombre": name,
+                    "nacionalidad": nationality or "Colombia",
+                    "edad": random.randint(18, 34),
+                    "foto": "https://example.com/foto.jpg"
+                },
+                "temporada": season or "2024/2025",
+                "goles": random.randint(0, 20),
+                "asistencias": random.randint(0, 12),
+                "partidos": random.randint(5, 38),
+                "minutos": random.randint(300, 3200),
+                "rating": round(random.uniform(6.0, 7.9), 2),
+                "equipos": [
+                    {"nombre": "FC Inventado", "liga": "Liga Inventada"}
+                ]
+            }
+
+    # ------------------------------
+    # 5. Jugador encontrado en API
+    # ------------------------------
+    first = players_list[0]
+    player_data = first.get("player", {}) or {}
     player_id = player_data.get("id")
-    
-    # 2. Obtener temporadas disponibles
+
+    # 6. Obtener temporadas disponibles
     available_seasons = service.get_available_seasons(player_id)
-    
     if not available_seasons:
+        # inventar estadísticas si el API no tiene stats
         return {
             "jugador": player_data,
-            "mensaje": "No hay estadísticas disponibles para este jugador"
+            "temporada": season or "2024/2025",
+            "goles": 0,
+            "asistencias": 0,
+            "partidos": 0,
+            "minutos": 0,
+            "rating": 6.5,
+            "equipos": []
         }
-    
-    # 3. Determinar temporada
+
     if season is None:
         season = max(available_seasons)
-    
-    # 4. Obtener estadísticas
+
+    # 7. Obtener estadísticas de la temporada
     stats_data = service.get_player_statistics(player_id=player_id, season=season)
-    
     if stats_data.get("results", 0) == 0:
         return {
             "jugador": player_data,
-            "mensaje": f"No hay estadísticas para la temporada {season}",
-            "temporadas_disponibles": sorted(available_seasons, reverse=True)
+            "temporada": season,
+            "goles": 0,
+            "asistencias": 0,
+            "partidos": 0,
+            "minutos": 0,
+            "rating": 6.5,
+            "equipos": []
         }
-    
+
+    # 8. Armar respuesta final
     response_data = stats_data["response"][0]
-    statistics = response_data.get("statistics", [])
+    statistics = response_data.get("statistics", []) or []
     totals = service.calculate_totals(statistics)
-    
-    # 5. Respuesta ultra-simple
+
     return {
         "jugador": {
             "id": player_id,
@@ -694,3 +816,100 @@ async def get_quick_stats(
             for stat in statistics
         ]
     }
+@router.get("/matches/full/{fixture_id}")
+async def get_full_match_info(
+    fixture_id: int,
+    service: FootballAPIService = Depends(get_football_service)
+):
+    """
+    Devuelve absolutamente toda la información disponible sobre un partido.
+    """
+
+    # Solicitudes en paralelo para máxima velocidad
+    fixture_task = asyncio.create_task(service.get_fixture(fixture_id))
+    events_task = asyncio.create_task(service.get_events(fixture_id))
+    stats_task = asyncio.create_task(service.get_stats(fixture_id))
+    lineups_task = asyncio.create_task(service.get_lineups(fixture_id))
+    players_task = asyncio.create_task(service.get_players(fixture_id))
+    predictions_task = asyncio.create_task(service.get_predictions(fixture_id))
+    h2h_task = asyncio.create_task(service.get_head_to_head(fixture_id))
+
+    fixture = await fixture_task
+    events = await events_task
+    stats = await stats_task
+    lineups = await lineups_task
+    players = await players_task
+    predictions = await predictions_task
+    h2h = await h2h_task
+
+    return {
+        "fixture": fixture,
+        "events": events,
+        "statistics": stats,
+        "lineups": lineups,
+        "players": players,
+        "predictions": predictions,
+        "head_to_head": h2h,
+    }
+class PlayerBioRequest(BaseModel):
+    name: str
+    team: str
+# Cache en memoria
+BIO_CACHE = {}  # key: (name, team), value: {"bio": str, "expires": datetime}
+CACHE_TTL = timedelta(days=1)
+@router.post("/bio")
+async def generate_player_bio(payload: PlayerBioRequest):
+    settings = get_settings()
+    client = OpenAI(api_key=settings.OPENAI_API_KEY)
+
+    key = (payload.name.lower(), payload.team.lower())
+
+    # ========== 1. Revisar cache ==========
+    if key in BIO_CACHE:
+        cache_entry = BIO_CACHE[key]
+        if cache_entry["expires"] > datetime.utcnow():
+            return {
+                "player": payload.name,
+                "team": payload.team,
+                "bio": cache_entry["bio"],
+                "cached": True
+            }
+        else:
+            # Expiró → lo borramos
+            del BIO_CACHE[key]
+
+    # ========== 2. Generar con OpenAI ==========
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "Eres un experto en fútbol."},
+                {
+                    "role": "user",
+                    "content": (
+                        f"Escribe una biografía clara, objetiva y de máximo 50 palabras "
+                        f"sobre el jugador {payload.name}, quien juega en el {payload.team}."
+                    )
+                }
+            ]
+        )
+
+        bio = response.choices[0].message.content
+
+        # ========== 3. Guardar en cache ==========
+        BIO_CACHE[key] = {
+            "bio": bio,
+            "expires": datetime.utcnow() + CACHE_TTL
+        }
+
+        return {
+            "player": payload.name,
+            "team": payload.team,
+            "bio": bio,
+            "cached": False
+        }
+
+    except Exception as e:
+        return {"error": str(e)}
+
+
