@@ -334,8 +334,12 @@ async def get_complete_match_info(
         "pais": league["country"],
         "equipos": {
             "local": teams["home"]["name"],
-            "visitante": teams["away"]["name"]
+            "visitante": teams["away"]["name"],
+            "local_logo": teams["home"].get("logo") or TEAM_LOGOS.get(teams["home"]["name"]),
+            "visitante_logo": teams["away"].get("logo") or TEAM_LOGOS.get(teams["away"]["name"])
         },
+
+
         "marcador": {
             "local": goals["home"],
             "visitante": goals["away"]
@@ -347,6 +351,8 @@ async def get_complete_match_info(
         "lineups": lineups,
         "lineups_disponibles": len(lineups) > 0
     }
+
+
 
 
 # ===== ENDPOINTS: EVENTS =====
@@ -674,3 +680,4 @@ async def generate_trivia(
     )
     
     return result
+

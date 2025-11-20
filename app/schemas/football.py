@@ -249,13 +249,18 @@ class SimpleLineup(BaseModel):
     startXI: List[Dict[str, Any]]
     substitutes: List[Dict[str, Any]]
 
+class TeamInfoWithLogos(BaseModel):
+    local: str
+    visitante: str
+    local_logo: Optional[str] = None
+    visitante_logo: Optional[str] = None
 
 class CompleteMatchResponse(BaseModel):
     fixture_id: int
     fecha: str
     liga: str
     pais: str
-    equipos: TeamInfo
+    equipos: TeamInfoWithLogos  # <-- usar la versión con logos
     marcador: Score
     estado: str
     minuto: Optional[int]
