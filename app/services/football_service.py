@@ -3,7 +3,8 @@ import requests
 from typing import Dict, Any, List, Optional
 from app.core.cache import cache_manager
 from app.schemas.football import MatchEvent
-
+from pydantic import BaseModel
+from typing import List, Dict
 class FootballAPIService:
     """Servicio para consultar datos de API-FOOTBALL"""
     
