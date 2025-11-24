@@ -10,7 +10,7 @@ async def refresh_match_data(match_id: int):
     """Descarga la información del partido y la guarda en cache."""
     try:
         async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(f"http://localhost:8004/football/match-complete/{match_id}")
+            resp = await client.get(f"http://localhost:8000/football/match-complete/{match_id}")
         if resp.status_code != 200:
             print(f"[WARN] Partido {match_id} no disponible: status {resp.status_code}")
             return None

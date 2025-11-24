@@ -139,7 +139,7 @@ Información del partido:
 
 Pregunta del usuario: {question}
 
-Responde de forma clara, emocionante y precisa. Las respuestas no pueden tener más de 70 palabras.
+Responde de forma clara, emocionante y precisa. Las respuestas no pueden tener más de 50 palabras o 240 caracteres. Tambien retorna la respuesta en Codigo HTML. 
 """
         
         response = openai.chat.completions.create(

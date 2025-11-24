@@ -629,7 +629,6 @@ async def ask_commentator(
     return result
 
 
-
 @router.get("/commentary/{match_id}", response_model=CommentaryResponse)
 async def get_match_commentary(
     match_id: int,
@@ -643,19 +642,41 @@ async def get_match_commentary(
     - **Cache**: 60 segundos
     - **Actualización**: Detecta cambios automáticamente
     """
-    # Obtener datos actuales
+
+    # Intentar obtener datos del cache
     current_data = match_data_cache.get(match_id)
     
     if not current_data:
-        await refresh_match_data(match_id)
-        current_data = match_data_cache.get(match_id)
+        try:
+            # Intentar refrescar datos desde la fuente externa
+            await refresh_match_data(match_id)
+            current_data = match_data_cache.get(match_id)
+        except Exception as e:
+            # Captura errores de conexión o fallos de la API externa
+            raise HTTPException(
+                503, 
+                detail=f"No se pudo obtener información del partido {match_id} desde la API externa: {str(e)}"
+            )
     
     if not current_data:
-        raise HTTPException(404, "No se pudo obtener información del partido.")
+        # Datos no disponibles tras refresco
+        raise HTTPException(
+            404, 
+            detail=f"No hay información disponible para el partido {match_id}. "
+                   "Puede que el partido no exista o la API externa no tenga datos aún."
+        )
     
     # Generar comentario
-    result = await commentary_service.generate_commentary(match_id, current_data)
+    try:
+        result = await commentary_service.generate_commentary(match_id, current_data)
+    except Exception as e:
+        raise HTTPException(
+            500,
+            detail=f"Error generando comentario para el partido {match_id}: {str(e)}"
+        )
+    
     return result
+
 
 
 # ===== ENDPOINTS: TRIVIA =====
