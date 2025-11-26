@@ -2,8 +2,9 @@
 from fastapi import APIRouter, HTTPException, Query, Depends, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from typing import Optional
-from app.schemas.football import LiveMatchesBasicResponse
 
+from app.schemas.football import LiveMatchesBasicResponse
+from app.core.cache import TTLCache
 from app.schemas.football import (
     # Responses
     LiveMatchesResponse, MatchInfo, MatchEventsResponse,
@@ -485,8 +486,6 @@ async def find_league(
     raise HTTPException(404, f"No se encontró una liga con el nombre '{nombre}'")
 
 
-# ===== ENDPOINTS: LINEUPS =====
-
 @router.get("/lineups/{fixture_id}", response_model=LineupResponse)
 async def get_match_lineups(
     fixture_id: int,
@@ -701,4 +700,220 @@ async def generate_trivia(
     )
     
     return result
+two_hour_cache = TTLCache(ttl_seconds=7200)
+team_seasons_cache = TTLCache(ttl_seconds=7200) 
+@router.get("/team-stats/{team_name}")
+async def get_team_statistics_by_name(
+    team_name: str,
+    season: Optional[int] = Query(None, description="Temporada específica (ej: 2024). Si no se especifica, muestra todas disponibles"),
+    league_name: Optional[str] = Query(None, description="Nombre de la liga (opcional)"),
+    service: FootballAPIService = Depends(get_football_service)
+):
+    """
+    Obtiene estadísticas de un equipo por nombre.
+    
+    - **team_name**: Nombre del equipo (ej: "Barcelona")
+    - **season**: Temporada opcional (ej: 2024). Si no se especifica, lista todas las disponibles
+    - **league_name**: Nombre de la liga opcional (ej: "La Liga")
+    
+    Si no se especifica season, retorna info de temporadas disponibles.
+    Si se especifica season, retorna estadísticas de esa temporada.
+    """
+    normalized = team_name.strip().lower()
 
+    # 1. Buscar equipo por nombre
+    team_search = service.search_team_by_name(normalized)
+
+    if not team_search or team_search.get("results", 0) == 0:
+        raise HTTPException(404, f"No se encontró el equipo '{team_name}'")
+
+    team_info = team_search["response"][0]
+    team_id = team_info["team"]["id"]
+    team_real_name = team_info["team"]["name"]
+    team_logo = team_info["team"].get("logo")
+    team_country = team_info["team"].get("country")
+
+    # 2. Obtener temporadas disponibles usando /teams/seasons
+    try:
+        seasons_response = service.request_get("/teams/seasons", params={"team": team_id})
+        
+        if not seasons_response or seasons_response.get("results", 0) == 0:
+            raise HTTPException(
+                404,
+                f"No se encontraron temporadas disponibles para '{team_real_name}'"
+            )
+        
+        available_seasons = seasons_response["response"]
+        
+    except Exception as e:
+        raise HTTPException(
+            500,
+            f"Error al obtener temporadas: {str(e)}"
+        )
+
+    # Si no se especificó season, retornar info de temporadas disponibles
+    if season is None:
+        return {
+            "equipo": {
+                "id": team_id,
+                "nombre": team_real_name,
+                "pais": team_country,
+                "logo": team_logo
+            },
+            "temporadas_disponibles": sorted(available_seasons, reverse=True),
+            "mensaje": f"Especifica ?season=YYYY para obtener estadísticas. Ejemplo: ?season={available_seasons[-1] if available_seasons else 2024}"
+        }
+
+    # Verificar que la temporada solicitada esté disponible
+    if season not in available_seasons:
+        return {
+            "equipo": {
+                "id": team_id,
+                "nombre": team_real_name,
+                "pais": team_country,
+                "logo": team_logo
+            },
+            "error": f"La temporada {season} no está disponible para {team_real_name}",
+            "temporadas_disponibles": sorted(available_seasons, reverse=True),
+            "sugerencia": f"Usa una de las temporadas disponibles, por ejemplo: ?season={available_seasons[-1]}"
+        }
+
+    # CACHE para temporada específica
+    cache_key = f"team_stats:{normalized}:{season}:{league_name or 'default'}"
+    cached = match_data_cache.get(cache_key)
+    if cached:
+        return {"cached": True, "data": cached}
+
+    # 3. Buscar ligas donde jugó el equipo en esa temporada
+    try:
+        # Usar /teams con league y season para encontrar todas las ligas
+        teams_in_season = service.request_get("/teams", params={
+            "id": team_id,
+            "season": season
+        })
+        
+        if not teams_in_season or teams_in_season.get("results", 0) == 0:
+            return {
+                "equipo": {
+                    "id": team_id,
+                    "nombre": team_real_name,
+                    "pais": team_country,
+                    "logo": team_logo
+                },
+                "error": f"No hay datos de ligas para {team_real_name} en {season}",
+                "temporadas_disponibles": sorted(available_seasons, reverse=True)
+            }
+        
+        # Extraer todas las ligas de esa temporada
+        available_leagues = []
+        for entry in teams_in_season["response"]:
+            league = entry.get("league", {})
+            if league:
+                available_leagues.append({
+                    "league_id": league["id"],
+                    "league_name": league["name"],
+                    "country": league.get("country"),
+                    "logo": league.get("logo")
+                })
+        
+        if not available_leagues:
+            return {
+                "equipo": {
+                    "id": team_id,
+                    "nombre": team_real_name,
+                    "logo": team_logo
+                },
+                "error": f"No se encontraron ligas para {team_real_name} en {season}",
+                "temporadas_disponibles": sorted(available_seasons, reverse=True)
+            }
+
+    except Exception as e:
+        raise HTTPException(500, f"Error al buscar ligas: {str(e)}")
+
+    # 4. Seleccionar liga
+    league_id = None
+    selected_league = None
+    
+    if league_name:
+        league_normalized = league_name.strip().lower()
+        for league in available_leagues:
+            if league_normalized in league["league_name"].lower():
+                league_id = league["league_id"]
+                selected_league = league
+                break
+        
+        if league_id is None:
+            available_names = [l["league_name"] for l in available_leagues]
+            raise HTTPException(
+                404,
+                f"No se encontró la liga '{league_name}'. Ligas disponibles en {season}: {', '.join(available_names)}"
+            )
+    else:
+        # Tomar la primera liga (normalmente la liga doméstica)
+        selected_league = available_leagues[0]
+        league_id = selected_league["league_id"]
+
+    # 5. Obtener estadísticas
+    try:
+        stats_data = service.get_team_statistics(
+            team_id=team_id,
+            league_id=league_id,
+            season=season
+        )
+        
+        if not stats_data or stats_data.get("results", 0) == 0:
+            return {
+                "equipo": {
+                    "id": team_id,
+                    "nombre": team_real_name,
+                    "logo": team_logo
+                },
+                "error": f"No hay estadísticas disponibles para {selected_league['league_name']} {season}",
+                "ligas_disponibles": available_leagues
+            }
+        
+        stats_raw = stats_data["response"]
+        
+    except Exception as e:
+        raise HTTPException(500, f"Error al obtener estadísticas: {str(e)}")
+
+    # 6. Formatear respuesta completa
+    result = {
+        "equipo": {
+            "id": team_id,
+            "nombre": stats_raw["team"]["name"],
+            "logo": stats_raw["team"].get("logo")
+        },
+        "liga": {
+            "id": stats_raw["league"]["id"],
+            "nombre": stats_raw["league"]["name"],
+            "pais": stats_raw["league"]["country"],
+            "logo": stats_raw["league"].get("logo"),
+            "bandera": stats_raw["league"].get("flag"),
+            "temporada": stats_raw["league"]["season"]
+        },
+        "forma": stats_raw.get("form"),
+        "partidos": stats_raw.get("fixtures", {}),
+        "goles": stats_raw.get("goals", {}),
+        "mayor_racha": stats_raw.get("biggest", {}),
+        "porteria_cero": stats_raw.get("clean_sheet", {}),
+        "fallo_anotar": stats_raw.get("failed_to_score", {}),
+        "penales": stats_raw.get("penalty", {}),
+        "alineaciones": stats_raw.get("lineups", []),
+        "tarjetas": stats_raw.get("cards", {}),
+        "otras_ligas_disponibles": [
+            {
+                "id": l["league_id"],
+                "nombre": l["league_name"],
+                "pais": l.get("country")
+            } for l in available_leagues if l["league_id"] != league_id
+        ]
+    }
+
+    # 7. Guardar en caché (2 horas)
+    match_data_cache.set(cache_key, result, ttl=7200)
+
+    return {
+        "cached": False,
+        "data": result
+    }

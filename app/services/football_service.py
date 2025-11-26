@@ -5,6 +5,7 @@ from app.core.cache import cache_manager
 from app.schemas.football import MatchEvent
 from pydantic import BaseModel
 from typing import List, Dict
+from app.core.cache import TTLCache
 class FootballAPIService:
     """Servicio para consultar datos de API-FOOTBALL"""
     
@@ -186,4 +187,37 @@ class FootballAPIService:
             return {"results": 0, "response": []}
 
         data = response.json()
+        return data
+    def request_get(self, endpoint: str, params: Dict[str, Any] = None):
+        """Método genérico para hacer solicitudes GET a API-FOOTBALL"""
+        url = f"{self.BASE_URL}{endpoint}"
+        response = requests.get(url, headers=self.headers, params=params, timeout=10)
+        return response.json()
+
+    def search_team_by_name(self, team_name: str):
+        return self.request_get("/teams", params={"search": team_name})
+
+    def get_team_statistics(self, team_id: int, league_id: int, season: int):
+        return self.request_get(
+            "/teams/statistics",
+            params={
+                "team": team_id,
+                "league": league_id,
+                "season": season
+            }
+        )
+    def get_team_seasons(self, team_id: int):
+        cache_key = f"team_seasons:{team_id}"
+
+        # Intentar leer desde cache (2h = 7200)
+        cached = cache_manager.get(cache_key, ttl=7200)
+        if cached:
+            return cached
+
+        # Llamar API
+        data = self.request_get("/teams/seasons", params={"team": team_id})
+
+        # Guardar
+        cache_manager.set(cache_key, data)
+
         return data

@@ -6,18 +6,122 @@ from datetime import datetime, timedelta
 from openai import OpenAI
 from app.services.players_service import PlayersAPIService
 from app.core.config import get_settings
-
+from openai import OpenAI
+from app.services.news_search_service import NewsSearchService
+from app.services.embedding_service import EmbeddingService
+import logging
+logger = logging.getLogger(__name__)
 
 class PlayersBusinessService:
-    """Servicios de alto nivel para jugadores (agregaciones, IA, fallbacks)"""
+    """Lógica de negocio para operaciones con jugadores"""
     
     def __init__(self, api_service: PlayersAPIService):
         self.api_service = api_service
-        self.settings = get_settings()
-        self.openai_client = OpenAI(api_key=self.settings.OPENAI_API_KEY)
-        self.bio_cache: Dict[tuple, Dict] = {}
-        self.cache_ttl = timedelta(days=1)
+        self.news_service = NewsSearchService()
+        self.embedding_service = EmbeddingService()
+        self.openai_client = OpenAI()
     
+    # ... (otros métodos como get_complete_player_info, calculate_totals, etc.)
+    
+    def generate_player_news(self, player_name: str) -> Dict[str, Any]:
+        """
+        Genera un resumen de noticias recientes sobre un jugador
+        usando búsqueda real de Google News + IA para síntesis
+        
+        Args:
+            player_name: Nombre completo del jugador
+            
+        Returns:
+            Dict con párrafo conciso, fecha y fuente principal
+        """
+        try:
+            # 1. Buscar noticias reales en Google News
+            noticias = self.news_service.search_google_news(
+                query=player_name,
+                max_results=5
+            )
+            
+            if not noticias:
+                return {
+                    "jugador": player_name,
+                    "noticia": f"No se encontraron noticias recientes sobre {player_name}.",
+                    "fecha": None,
+                    "fuente": None,
+                    "mensaje": "Sin resultados en Google News"
+                }
+            
+            # 2. Usar solo la primera fuente (más relevante)
+            noticia_principal = noticias[0]
+            
+            # Construir contexto con título y snippet
+            titulo = noticia_principal.get('title', '')
+            snippet = noticia_principal.get('snippet', '')
+            
+            if not snippet or len(snippet) < 50:
+                # Si no hay snippet, usar solo título
+                context = titulo
+            else:
+                context = f"{titulo}. {snippet}"
+            
+            if not context.strip():
+                return {
+                    "jugador": player_name,
+                    "noticia": f"Se encontró una noticia sobre {player_name} pero sin contenido suficiente.",
+                    "fecha": noticia_principal.get('date'),
+                    "fuente": noticia_principal.get('source'),
+                    "link": noticia_principal.get('link'),
+                    "mensaje": "Noticia sin contenido"
+                }
+            
+            # 3. Generar párrafo conciso con GPT
+            
+            prompt = f"""Eres un periodista deportivo colombiano. Basándote ÚNICAMENTE en esta noticia real:
+
+            {context}
+
+            Genera un párrafo corto (máximo 2-3 oraciones) sobre {player_name}.
+
+            REQUISITOS ESTRICTOS:
+            - Máximo 60 palabras
+            - Tono informativo y profesional
+            - NO inventes información que no esté en la fuente
+            - Usa solo la información proporcionada
+            - Sé conciso y directo
+
+            Párrafo:"""
+
+            response = self.openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "Eres un periodista deportivo conciso y preciso. Solo reportas hechos."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=100,
+                temperature=0.2  # Muy baja temperatura para ser más factual
+            )
+            
+            parrafo = response.choices[0].message.content.strip()
+            
+            # 4. Retornar respuesta estructurada con UNA sola fuente
+            noticia_principal = noticias[0]
+            
+            return {
+                "jugador": player_name,
+                "noticia": parrafo,
+                "fecha": noticia_principal.get('date'),
+                "fuente": noticia_principal.get('source'),
+                "link": noticia_principal.get('link')
+            }
+            
+        except Exception as e:
+            logger.error(f"Error generando noticia para {player_name}: {e}")
+            return {
+                "jugador": player_name,
+                "noticia": f"Error al generar noticia: {str(e)}",
+                "fecha": None,
+                "fuente": None,
+                "error": str(e)
+            }
     # ============== CALCULATIONS ==============
     def calculate_totals(self, statistics: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Calcula totales agregados de estadísticas"""
@@ -124,27 +228,8 @@ class PlayersBusinessService:
             },
             "temporadas_disponibles": sorted(available_seasons, reverse=True)
         }
-    
-    # ============== AI FEATURES ==============
-    def generate_player_news(self, player_name: str) -> Dict[str, Any]:
-        """Genera noticia corta sobre un jugador"""
-        prompt = (
-            f"Escribe un párrafo muy breve sobre una noticia o dato curioso reciente "
-            f"del jugador de fútbol {player_name}. Máximo 3-4 líneas, estilo informativo."
-        )
         
-        try:
-            response = self.openai_client.chat.completions.create(
-                model=self.settings.OPENAI_MODEL_ID,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=100,
-                temperature=0.7
-            )
-            content = response.choices[0].message.content.strip()
-            return {"player": player_name, "news": content}
-        except Exception as e:
-            return {"error": "No se pudo generar la noticia", "detail": str(e)}
-    
+        
     def generate_player_bio(self, player_name: str, team: str) -> Dict[str, Any]:
         """Genera biografía con cache"""
         cache_key = (player_name.lower(), team.lower())

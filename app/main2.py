@@ -3,13 +3,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import get_settings
 from app.api.routers import analyze, health, ask, validate, football, products, players  
 
-# Importar configuración de logging
+# ===== IMPORTS DE LOGGING =====
 from app.core.logging_config import setup_logging
 from app.middleware import RequestLoggingMiddleware, PerformanceMonitoringMiddleware
+from app.middleware.response_logger import ResponseLoggerMiddleware  # ✅ NUEVO
+from app.api.routers import log_viewer  # ✅ NUEVO - Endpoints de logs
 import logging
 
 # Configurar logging al inicio
-setup_logging(level=logging.INFO)  # Cambiar a DEBUG para más detalles
+setup_logging(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 def create_app() -> FastAPI:
@@ -24,15 +26,26 @@ def create_app() -> FastAPI:
     
     # ============== MIDDLEWARES ==============
     
-    # 1. Middleware de logging de requests
+    # 1. Middleware de logging de requests (original)
     app.add_middleware(RequestLoggingMiddleware)
     logger.info("✓ Request logging middleware activado")
     
-    # 2. Middleware de monitoreo de rendimiento (alerta si request > 5s)
+    # 2. Middleware de monitoreo de rendimiento
     app.add_middleware(PerformanceMonitoringMiddleware, slow_request_threshold=5.0)
     logger.info("✓ Performance monitoring middleware activado (umbral: 5.0s)")
     
-    # 3. CORS middleware
+    # ✅ 3. NUEVO: Middleware para guardar responses
+    app.add_middleware(
+        ResponseLoggerMiddleware,
+        db_path="logs/api_responses.db",
+        json_logs_dir="logs/json",
+        enable_json_logs=True,
+        monitored_prefixes=["/football", "/players", "/products"]
+    )
+    logger.info("✓ Response Logger activado (guardando en SQLite + JSON)")
+    logger.info("  → Monitoreando: /football, /players, /products")
+    
+    # 4. CORS middleware
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -51,6 +64,7 @@ def create_app() -> FastAPI:
     app.include_router(football.router)
     app.include_router(products.router)
     app.include_router(players.router)
+    app.include_router(log_viewer.router)  # ✅ NUEVO - Endpoints de logs
     logger.info("✓ Todos los routers incluidos")
     
     @app.get("/")
@@ -66,8 +80,13 @@ def create_app() -> FastAPI:
                 "/football", 
                 "/products",
                 "/players",
+                "/logs",  # ✅ NUEVO
                 "/docs"
             ],
+            "new_features": {
+                "response_logging": "Todas las respuestas de /football, /players, /products se guardan automáticamente",
+                "log_viewer": "Usa /logs/stats, /logs/recent, /logs/search para consultar logs"
+            }
         }
     
     @app.on_event("startup")
@@ -98,6 +117,7 @@ def create_app() -> FastAPI:
         logger.info("✓ API de fútbol en vivo disponible en /football")
         logger.info("✓ API de productos de jugadores disponible en /products")
         logger.info("✓ API de estadísticas de jugadores disponible en /players")
+        logger.info("✓ Sistema de logs disponible en /logs")  # ✅ NUEVO
         logger.info("=" * 80)
         logger.info("🚀 SISTEMA LISTO - Esperando requests...")
         logger.info("=" * 80)
@@ -120,5 +140,5 @@ if __name__ == "__main__":
         host="0.0.0.0", 
         port=8003, 
         reload=True,
-        log_config=None  # Usar nuestro propio sistema de logging
+        log_config=None
     )

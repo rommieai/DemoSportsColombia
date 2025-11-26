@@ -4,6 +4,7 @@ from typing import Optional
 from pydantic import BaseModel
 
 from app.core.config import get_settings
+from app.core.cache import cache_manager  # ✅ IMPORTAR cache_manager
 from app.services.players_service import PlayersAPIService
 from app.services.players_business import PlayersBusinessService
 from app.schemas.players import (
@@ -111,11 +112,27 @@ async def get_quick_stats(
     
     - Usa AI fallback si no encuentra el jugador
     - Filtra por nacionalidad si se especifica
+    - **Caché**: 2 horas
     - **Ejemplos**: 
       - `/players/quick-stats?name=James&nationality=Colombia`
       - `/players/quick-stats?name=Messi&nacionalidad=Argentina`
     """
+    # ✅ Generar clave de caché única
+    cache_key = f"quick_stats_{name.lower().strip()}_{season or 'latest'}_{(nationality or '').lower().strip()}"
+    
+    # ✅ Intentar obtener desde caché (2 horas = 7200 segundos)
+    cached = cache_manager.get(cache_key, ttl=7200)
+    if cached:
+        cached["_from_cache"] = True
+        return cached
+    
+    # ✅ Generar resultado
     result = business_service.search_with_fallback(name, season, nationality)
+    
+    # ✅ Guardar en caché
+    cache_manager.set(cache_key, result)
+    result["_from_cache"] = False
+    
     return result
 
 
@@ -448,6 +465,23 @@ async def get_player_news(
     """
     Obtiene noticia reciente sobre un jugador (AI).
     
+    - **Caché**: 2 horas
     - **Ejemplo**: `/players/news?name=James Rodriguez`
     """
-    return business_service.generate_player_news(name)
+
+    cache_key = f"news_{name.lower().strip()}"
+    
+
+    cached = cache_manager.get(cache_key, ttl=7200)
+    if cached:
+        cached["_from_cache"] = True
+        return cached
+    
+
+    result = business_service.generate_player_news(name)
+    
+
+    cache_manager.set(cache_key, result)
+    result["_from_cache"] = False
+    
+    return result

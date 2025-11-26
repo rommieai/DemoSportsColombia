@@ -313,11 +313,17 @@ class StreamReadyEvent(BaseModel):
     fixture_id: int
     status: str
 
-
+class MatchStatus(BaseModel):
+    """Estado actual del partido"""
+    estado: str
+    minuto: Optional[int] = None
+    marcador_local: Optional[int] = None
+    marcador_visitante: Optional[int] = None
+    
 class StreamNewEventsData(BaseModel):
     fixture_id: int
     nuevos: List[EventWithBet]
-
+    status: MatchStatus
 
 class StreamErrorEvent(BaseModel):
     message: str
