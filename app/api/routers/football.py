@@ -1,39 +1,33 @@
-"""Endpoints para datos de fútbol en vivo"""
+"""Endpoints actualizados para usar Firebase en lugar de caché en memoria"""
 from fastapi import APIRouter, HTTPException, Query, Depends, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from typing import Optional
-
+from app.services.colorExtractionService import get_team_colors_from_logo
+from app.tasks import get_both_teams_stats_cached  # Importar la función batch
+from app.services.mockStreamService import mockStreamService
 from app.schemas.football import LiveMatchesBasicResponse
-from app.core.cache import TTLCache
 from app.schemas.football import (
-    # Responses
     LiveMatchesResponse, MatchInfo, MatchEventsResponse,
     FixturesByDateResponse, LeaguesResponse, LineupResponse,
     CompleteMatchResponse, CommentaryResponse, AskResponse,
-    TriviaResponse,
-    # Requests
-    AskRequest, TriviaRequest,
-    # Basic models
-    FixtureBasicInfo
+    TriviaResponse, AskRequest, TriviaRequest, FixtureBasicInfo
 )
-from app.services.football_service import FootballAPIService
+from app.services.football_firebase_service import FootballFirebaseService
 from app.services.commentary_service import CommentaryService
 from app.services.trivia_service import TriviaService
 from app.services.stream_service import StreamService
 from app.core.config import get_settings
-from app.core.cache import match_data_cache
-from app.tasks import refresh_match_data
-
+from app.tasks import refresh_match_data, get_match_data_from_firebase
 
 # ===== ROUTER Y DEPENDENCIES =====
 router = APIRouter(prefix="/football", tags=["Football Live Data"])
 
 
-def get_football_service() -> FootballAPIService:
-    """Dependency: Servicio de API de fútbol"""
+def get_football_service() -> FootballFirebaseService:
+    """Dependency: Servicio de API de fútbol con Firebase"""
     settings = get_settings()
     api_key = getattr(settings, 'FOOTBALL_API_KEY', "0e88fe12ff5324e08d0dd7b35659829e")
-    return FootballAPIService(api_key)
+    return FootballFirebaseService(api_key)
 
 
 def get_commentary_service() -> CommentaryService:
@@ -47,7 +41,7 @@ def get_trivia_service() -> TriviaService:
 
 
 def get_stream_service(
-    football_service: FootballAPIService = Depends(get_football_service)
+    football_service: FootballFirebaseService = Depends(get_football_service)
 ) -> StreamService:
     """Dependency: Servicio de streaming"""
     return StreamService(football_service)
@@ -56,27 +50,41 @@ def get_stream_service(
 # ===== ENDPOINTS: LIVE MATCHES =====
 
 @router.get("/live-matches", response_model=LiveMatchesBasicResponse)
-async def get_live_matches(service: FootballAPIService = Depends(get_football_service)):
-    data = service.get_live_fixtures()
-    if data.get("results", 0) == 0:
-        return {"total": 0, "matches": []}
-    matches = [service.format_match_info(match) for match in data["response"]]
-    return {"total": len(matches), "matches": matches}
-
+async def get_live_matches(
+    force_refresh: bool = Query(False, description="Forzar actualización desde API"),
+    service: FootballFirebaseService = Depends(get_football_service)
+):
+    """
+    Obtiene todos los partidos en vivo (OPTIMIZADO)
+    
+    MEJORA: Datos pre-formateados en Firebase para evitar procesamiento repetido
+    
+    - **force_refresh**: Si True, fuerza actualización desde API externa
+    - **Cache doble**: 
+        - Datos RAW: 60s
+        - Datos formateados: 60s
+    - **Beneficio**: 100 usuarios = 1 formateo, no 100 formateos
+    """
+    # Obtener datos YA formateados
+    return service.get_live_fixtures_formatted(force_refresh=force_refresh)
+    
 
 # ===== ENDPOINTS: FIXTURE SEARCH =====
 
 @router.get("/fixtures-by-date", response_model=FixturesByDateResponse)
 async def get_fixtures_by_date(
     fecha: str = Query(..., description="Fecha de los partidos en formato YYYY-MM-DD"),
-    service: FootballAPIService = Depends(get_football_service)
+    force_refresh: bool = Query(False, description="Forzar actualización desde API"),
+    service: FootballFirebaseService = Depends(get_football_service)
 ):
     """
     Devuelve todos los partidos programados para una fecha específica.
     
     - **fecha**: Fecha de los partidos (YYYY-MM-DD)
+    - **force_refresh**: Forzar actualización desde API
+    - **Cache**: 5 minutos en Firebase
     """
-    data = service.get_fixtures_by_date(fecha)
+    data = service.get_fixtures_by_date(fecha, force_refresh=force_refresh)
     
     if data.get("results", 0) == 0:
         raise HTTPException(404, f"No hay partidos programados para la fecha {fecha}")
@@ -95,203 +103,94 @@ async def get_fixtures_by_date(
     return {"total": len(resultados), "partidos": resultados}
 
 
-@router.get("/fixture-by-date-teams", response_model=FixtureBasicInfo)
-async def get_fixture_by_date_and_teams(
-    fecha: str = Query(..., description="Fecha del partido (YYYY-MM-DD)"),
-    local: str = Query(..., description="Nombre parcial del equipo local"),
-    visitante: str = Query(..., description="Nombre parcial del equipo visitante"),
-    service: FootballAPIService = Depends(get_football_service)
-):
-    """
-    Busca un fixture por fecha y por los nombres de los equipos.
-    
-    - **fecha**: Fecha del partido (YYYY-MM-DD)
-    - **local**: Nombre (parcial) del equipo local
-    - **visitante**: Nombre (parcial) del equipo visitante
-    """
-    data = service.get_fixtures_by_date(fecha)
-    
-    if data.get("results", 0) == 0:
-        raise HTTPException(404, f"No hay partidos programados para la fecha {fecha}")
-    
-    for match in data["response"]:
-        home_name = match["teams"]["home"]["name"].lower()
-        away_name = match["teams"]["away"]["name"].lower()
-        
-        if local.lower() in home_name and visitante.lower() in away_name:
-            return {
-                "fixture_id": match["fixture"]["id"],
-                "local": match["teams"]["home"]["name"],
-                "visitante": match["teams"]["away"]["name"],
-                "liga": match["league"]["name"],
-                "fecha": match["fixture"]["date"],
-                "estado": match["fixture"]["status"]["long"],
-                "minuto": match["fixture"]["status"]["elapsed"]
-            }
-    
-    raise HTTPException(404, f"No se encontró un partido entre {local} y {visitante} en la fecha {fecha}")
-
-
-@router.get("/find-fixture", response_model=FixtureBasicInfo)
-async def find_fixture(
-    local: str = Query(..., description="Nombre del equipo local"),
-    visitante: str = Query(..., description="Nombre del equipo visitante"),
-    liga: str = Query(..., description="Nombre de la liga"),
-    service: FootballAPIService = Depends(get_football_service)
-):
-    """
-    Busca el fixture_id de un partido en vivo por equipos y liga.
-    
-    - **local**: Nombre (parcial) del equipo local
-    - **visitante**: Nombre (parcial) del equipo visitante
-    - **liga**: Nombre (parcial) de la liga
-    """
-    data = service.get_live_fixtures()
-    
-    if data.get("results", 0) == 0:
-        raise HTTPException(404, "No hay partidos en vivo")
-    
-    for match in data["response"]:
-        home = match["teams"]["home"]["name"].lower()
-        away = match["teams"]["away"]["name"].lower()
-        league_name = match["league"]["name"].lower()
-        
-        if (local.lower() in home and 
-            visitante.lower() in away and 
-            liga.lower() in league_name):
-            
-            return {
-                "fixture_id": match["fixture"]["id"],
-                "local": match["teams"]["home"]["name"],
-                "visitante": match["teams"]["away"]["name"],
-                "liga": match["league"]["name"],
-                "estado": match["fixture"]["status"]["long"],
-                "minuto": match["fixture"]["status"]["elapsed"]
-            }
-    
-    raise HTTPException(404, "No se encontró un partido con esos parámetros")
-
-
-# ===== ENDPOINTS: MATCH DETAILS =====
-
-@router.get("/match/{fixture_id}", response_model=MatchInfo)
-async def get_match_detail(
-    fixture_id: int,
-    service: FootballAPIService = Depends(get_football_service)
-):
-    """
-    Obtiene información detallada de un partido específico.
-    
-    - **fixture_id**: ID del partido
-    - **Incluye**: Eventos, estadísticas, estado actual
-    - **Caché**: Estadísticas cacheadas por 60 segundos
-    """
-    data = service.get_fixture_by_id(fixture_id)
-    
-    if data.get("results", 0) == 0:
-        raise HTTPException(404, "No se encontró el partido")
-    
-    match = data["response"][0]
-    fixture = match["fixture"]
-    league = match["league"]
-    teams = match["teams"]
-    goals = match["goals"]
-    status = fixture["status"]
-    events = match.get("events", [])
-    
-    # Obtener estadísticas
-    stats_data = service.get_fixture_statistics(fixture_id)
-    estadisticas = {}
-    for equipo_stats in stats_data:
-        equipo = equipo_stats["team"]["name"]
-        estadisticas[equipo] = {
-            s["type"]: s["value"] for s in equipo_stats["statistics"]
-        }
-    
-    # Procesar eventos
-    eventos = [{
-        "minuto": e["time"]["elapsed"],
-        "equipo": e["team"]["name"],
-        "jugador": e["player"]["name"] if e["player"] else None,
-        "tipo": e["type"],
-        "detalle": e["detail"]
-    } for e in events]
-    
-    # Detectar nuevos eventos
-    from app.core.cache import events_history
-    nuevo_evento = events_history.has_new_events(fixture_id, eventos)
-    if nuevo_evento:
-        events_history.set_last_events(fixture_id, eventos)
-    
-    return {
-        "fixture_id": fixture["id"],
-        "fecha": fixture["date"],
-        "liga": league["name"],
-        "pais": league["country"],
-        "equipos": {
-            "local": teams["home"]["name"],
-            "visitante": teams["away"]["name"]
-        },
-        "marcador": {
-            "local": goals["home"],
-            "visitante": goals["away"]
-        },
-        "estado": status["long"],
-        "minuto": status["elapsed"],
-        "eventos": eventos,
-        "nuevo_evento": nuevo_evento,
-        "estadisticas": estadisticas
-    }
-
-
 @router.get("/match-complete/{fixture_id}", response_model=CompleteMatchResponse)
 async def get_complete_match_info(
     fixture_id: int,
-    service: FootballAPIService = Depends(get_football_service)
+    force_refresh: bool = Query(False, description="Forzar actualización desde API"),
+    extract_colors: bool = Query(True, description="Extraer colores de logos (puede ser más lento)"),
+    service: FootballFirebaseService = Depends(get_football_service)
 ):
     """
-    ENDPOINT TODO-EN-UNO: Obtiene TODA la información de un partido.
+    ENDPOINT TODO-EN-UNO OPTIMIZADO: Obtiene TODA la información de un partido.
     
-    - **fixture_id**: ID del partido
-    - **Incluye**: Info básica, eventos, estadísticas, alineaciones
+    NUEVO: Incluye colores dominantes extraídos de los logos
     
-    ### Perfecto para:
-    - Pantallas de partido completo
-    - Reducir número de llamadas a la API
+    Args:
+        fixture_id: ID del partido
+        force_refresh: Forzar actualización desde API externa
+        extract_colors: Si False, no extrae colores (más rápido)
     """
-    match_data = service.get_fixture_by_id(fixture_id)
+    # 1️⃣ OBTENER DATOS COMPLETOS DEL PARTIDO
+    match_data = await refresh_match_data(fixture_id, force=force_refresh)
     
-    if match_data.get("results", 0) == 0:
+    if not match_data:
         raise HTTPException(404, "No se encontró el partido")
     
-    match = match_data["response"][0]
+    # 2️⃣ EXTRAER DATOS BÁSICOS
+    match = match_data["fixture"]
     fixture = match["fixture"]
     league = match["league"]
     teams = match["teams"]
     goals = match["goals"]
     status = fixture["status"]
-    events = match.get("events", [])
     
-    # Estadísticas
-    stats_data = service.get_fixture_statistics(fixture_id)
+    # IDs necesarios para estadísticas de temporada
+    league_id = league["id"]
+    season = int(fixture["date"][:4])
+    home_team_id = teams["home"]["id"]
+    away_team_id = teams["away"]["id"]
+    
+    # 🎨 EXTRAER COLORES DE LOGOS (NUEVO)
+    home_logo = teams["home"].get("logo")
+    away_logo = teams["away"].get("logo")
+    
+    home_colors = {"primary": "#1E40AF", "secondary": "#DC2626"}  # Default
+    away_colors = {"primary": "#059669", "secondary": "#F59E0B"}  # Default
+    
+    if extract_colors:
+        try:
+            if home_logo:
+                home_colors = get_team_colors_from_logo(home_logo)
+            if away_logo:
+                away_colors = get_team_colors_from_logo(away_logo)
+        except Exception as e:
+            print(f"Error extrayendo colores: {str(e)}")
+            # Continuar con colores por defecto
+    
+    # 3️⃣ PROCESAR EVENTOS
+    raw_events = match_data.get("events", [])
+    eventos = []
+    
+    for e in raw_events:
+        if isinstance(e, dict) and "minuto" in e:
+            eventos.append({
+                "minuto": e.get("minuto"),
+                "equipo": e.get("equipo"),
+                "jugador": e.get("jugador"),
+                "tipo": e.get("tipo"),
+                "detalle": e.get("detalle")
+            })
+        else:
+            eventos.append({
+                "minuto": e.get("time", {}).get("elapsed"),
+                "equipo": e.get("team", {}).get("name"),
+                "jugador": e.get("player", {}).get("name") if e.get("player") else None,
+                "tipo": e.get("type"),
+                "detalle": e.get("detail")
+            })
+    
+    # 4️⃣ PROCESAR ESTADÍSTICAS DEL PARTIDO
+    stats_data = match_data.get("statistics", [])
     estadisticas = {}
+    
     for equipo_stats in stats_data:
         equipo = equipo_stats["team"]["name"]
         estadisticas[equipo] = {
             s["type"]: s["value"] for s in equipo_stats["statistics"]
         }
     
-    # Eventos
-    eventos = [{
-        "minuto": e["time"]["elapsed"],
-        "equipo": e["team"]["name"],
-        "jugador": e["player"]["name"] if e["player"] else None,
-        "tipo": e["type"],
-        "detalle": e["detail"]
-    } for e in events]
-    
-    # Lineups
-    lineups_data = service.get_fixture_lineups(fixture_id)
+    # 5️⃣ OBTENER LINEUPS
+    lineups_data = service.get_fixture_lineups(fixture_id, force_refresh=False)
     lineups = []
     
     if lineups_data:
@@ -328,19 +227,39 @@ async def get_complete_match_info(
                 "substitutes": substitutes
             })
     
+    # 6️⃣ OBTENER ESTADÍSTICAS DE TEMPORADA (BATCH)
+    both_stats = await get_both_teams_stats_cached(
+        home_team_id=home_team_id,
+        away_team_id=away_team_id,
+        league_id=league_id,
+        season=season,
+        force_refresh=force_refresh
+    )
+    
+    home_stats = both_stats["home"]
+    away_stats = both_stats["away"]
+    
+    # 7️⃣ CONSTRUIR RESPUESTA FINAL (CON COLORES)
     return {
         "fixture_id": fixture["id"],
         "fecha": fixture["date"],
         "liga": league["name"],
         "pais": league["country"],
+        "temporada": season,
         "equipos": {
-            "local": teams["home"]["name"],
-            "visitante": teams["away"]["name"],
-            "local_logo": teams["home"].get("logo") or TEAM_LOGOS.get(teams["home"]["name"]),
-            "visitante_logo": teams["away"].get("logo") or TEAM_LOGOS.get(teams["away"]["name"])
+            "local": {
+                "nombre": teams["home"]["name"],
+                "logo": home_logo,
+                "colores": home_colors,  # 🎨 NUEVO
+                "estadisticas_temporada": home_stats
+            },
+            "visitante": {
+                "nombre": teams["away"]["name"],
+                "logo": away_logo,
+                "colores": away_colors,  # 🎨 NUEVO
+                "estadisticas_temporada": away_stats
+            }
         },
-
-
         "marcador": {
             "local": goals["home"],
             "visitante": goals["away"]
@@ -348,154 +267,25 @@ async def get_complete_match_info(
         "estado": status["long"],
         "minuto": status["elapsed"],
         "eventos": eventos,
-        "estadisticas": estadisticas,
+        "estadisticas_partido": estadisticas,
         "lineups": lineups,
         "lineups_disponibles": len(lineups) > 0
     }
 
 
-
-
-# ===== ENDPOINTS: EVENTS =====
-
-@router.get("/match-events/{fixture_id}", response_model=MatchEventsResponse)
-async def get_match_events(
-    fixture_id: int,
-    service: FootballAPIService = Depends(get_football_service)
-):
-    """
-    Obtiene un snapshot de todos los eventos actuales del partido.
-    
-    - **fixture_id**: ID del partido
-    - **Uso**: Ideal para primera carga antes de conectarse al stream
-    """
-    from app.core.cache import events_cache, events_history
-    
-    # Intentar cache
-    cached_events = events_cache.get(f"events:{fixture_id}")
-    
-    if cached_events is None:
-        # Obtener desde API
-        eventos_raw = service.get_fixture_events(fixture_id)
-        
-        if not eventos_raw:
-            raise HTTPException(404, f"No se encontraron eventos para fixture {fixture_id}")
-        
-        cached_events = [service.normalize_event(e) for e in eventos_raw]
-        cached_events.sort(key=lambda x: (x["minuto"] if x["minuto"] is not None else -1))
-        
-        # Guardar en cache
-        events_cache.set(f"events:{fixture_id}", cached_events)
-    
-    # Actualizar historial
-    events_history.set_last_events(fixture_id, cached_events)
-    
-    return {
-        "fixture_id": fixture_id,
-        "eventos": cached_events,
-        "total": len(cached_events)
-    }
-
-
-@router.get("/stream-events/{fixture_id}")
-async def stream_match_events(
-    fixture_id: int,
-    poll_sec: float = Query(default=10.0, ge=10.0, le=10.0),
-    stream_service: StreamService = Depends(get_stream_service)
-):
-    """
-    Stream en tiempo real de eventos del partido (Server-Sent Events).
-    
-    - **fixture_id**: ID del partido
-    - **poll_sec**: Intervalo de polling (fijo en 10 segundos)
-    - **Eventos**: ready, events, error
-    """
-    return StreamingResponse(
-        stream_service.stream_match_events(fixture_id, poll_sec),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no"
-        }
-    )
-
-
-# ===== ENDPOINTS: LEAGUES =====
-
-@router.get("/leagues", response_model=LeaguesResponse)
-async def get_leagues(
-    service: FootballAPIService = Depends(get_football_service)
-):
-    """
-    Obtiene todas las ligas disponibles en la API.
-    
-    - **Sin parámetros**: Retorna lista completa
-    - **Uso**: Para mostrar catálogo de ligas disponibles
-    """
-    data = service.get_leagues()
-    
-    if data.get("results", 0) == 0:
-        return {"total_ligas": 0, "ligas": []}
-    
-    ligas = []
-    for league in data.get("response", []):
-        l = league["league"]
-        c = league["country"]
-        ligas.append({
-            "id": l["id"],
-            "nombre": l["name"],
-            "pais": c["name"],
-            "tipo": l["type"],
-            "temporada_actual": l.get("season"),
-            "logo": l["logo"]
-        })
-    
-    return {"total_ligas": len(ligas), "ligas": ligas}
-
-
-@router.get("/find-league")
-async def find_league(
-    nombre: str = Query(..., description="Nombre de la liga a buscar"),
-    service: FootballAPIService = Depends(get_football_service)
-):
-    """
-    Busca una liga específica por nombre.
-    
-    - **nombre**: Nombre (parcial) de la liga
-    - **Retorna**: Primera coincidencia encontrada
-    """
-    data = service.get_leagues()
-    
-    if data.get("results", 0) == 0:
-        raise HTTPException(500, "No se pudieron obtener las ligas")
-    
-    for league in data["response"]:
-        l = league["league"]
-        c = league["country"]
-        if nombre.lower() in l["name"].lower():
-            return {
-                "id": l["id"],
-                "nombre": l["name"],
-                "pais": c["name"],
-                "tipo": l["type"],
-                "temporada_actual": l.get("season"),
-                "logo": l["logo"]
-            }
-    
-    raise HTTPException(404, f"No se encontró una liga con el nombre '{nombre}'")
-
-
 @router.get("/lineups/{fixture_id}", response_model=LineupResponse)
 async def get_match_lineups(
     fixture_id: int,
-    service: FootballAPIService = Depends(get_football_service)
+    force_refresh: bool = Query(False, description="Forzar actualización desde API"),
+    service: FootballFirebaseService = Depends(get_football_service)
 ):
     """
     Obtiene las alineaciones (lineups) de un partido.
     
     - **fixture_id**: ID del partido
+    - **force_refresh**: Forzar actualización desde API
     - **Incluye**: Titulares, suplentes, formación, entrenador
+    - **Cache**: 1 hora en Firebase (las alineaciones no cambian durante el partido)
     """
     POSITION_MAP = {
         "G": "Portero",
@@ -510,7 +300,7 @@ async def get_match_lineups(
         return POSITION_MAP.get(pos_letter.upper(), "Desconocido")
     
     # Información del partido
-    match_data = service.get_fixture_by_id(fixture_id)
+    match_data = service.get_fixture_by_id(fixture_id, force_refresh=False)
     
     if match_data.get("results", 0) == 0:
         raise HTTPException(404, "No se encontró el partido")
@@ -519,7 +309,7 @@ async def get_match_lineups(
     teams = match["teams"]
     
     # Alineaciones
-    lineups_data = service.get_fixture_lineups(fixture_id)
+    lineups_data = service.get_fixture_lineups(fixture_id, force_refresh=force_refresh)
     
     if not lineups_data:
         raise HTTPException(
@@ -602,15 +392,20 @@ async def ask_commentator(
     req: AskRequest,
     commentary_service: CommentaryService = Depends(get_commentary_service)
 ):
-    """Pregunta al comentarista IA sobre un partido específico."""
+    """
+    Pregunta al comentarista IA sobre un partido específico.
     
-    # Intentar obtener datos del cache
-    match_data = match_data_cache.get(match_id)
+    - **match_id**: ID del partido
+    - **question**: Pregunta del usuario
+    - **Cache**: Usa datos de Firebase automáticamente
+    """
+    # Obtener datos del cache de Firebase
+    match_data = get_match_data_from_firebase(match_id)
     
     if not match_data:
-        # Forzar fetch inmediato
-        await refresh_match_data(match_id)
-        match_data = match_data_cache.get(match_id)
+        # Forzar actualización
+        await refresh_match_data(match_id, force=True)
+        match_data = get_match_data_from_firebase(match_id)
     
     if not match_data:
         raise HTTPException(404, "No se pudo obtener información del partido para responder la pregunta.")
@@ -638,31 +433,26 @@ async def get_match_commentary(
     Genera un comentario corto y relevante sobre el partido.
     
     - **match_id**: ID del partido
-    - **Cache**: 60 segundos
+    - **Cache**: Usa Firebase automáticamente (60 segundos)
     - **Actualización**: Detecta cambios automáticamente
     """
-
-    # Intentar obtener datos del cache
-    current_data = match_data_cache.get(match_id)
+    # Intentar obtener datos del cache de Firebase
+    current_data = get_match_data_from_firebase(match_id)
     
     if not current_data:
         try:
-            # Intentar refrescar datos desde la fuente externa
-            await refresh_match_data(match_id)
-            current_data = match_data_cache.get(match_id)
+            await refresh_match_data(match_id, force=True)
+            current_data = get_match_data_from_firebase(match_id)
         except Exception as e:
-            # Captura errores de conexión o fallos de la API externa
             raise HTTPException(
                 503, 
                 detail=f"No se pudo obtener información del partido {match_id} desde la API externa: {str(e)}"
             )
     
     if not current_data:
-        # Datos no disponibles tras refresco
         raise HTTPException(
             404, 
-            detail=f"No hay información disponible para el partido {match_id}. "
-                   "Puede que el partido no exista o la API externa no tenga datos aún."
+            detail=f"No hay información disponible para el partido {match_id}."
         )
     
     # Generar comentario
@@ -675,7 +465,6 @@ async def get_match_commentary(
         )
     
     return result
-
 
 
 # ===== ENDPOINTS: TRIVIA =====
@@ -691,7 +480,7 @@ async def generate_trivia(
     - **team1**: Nombre del primer equipo
     - **team2**: Nombre del segundo equipo
     - **Preguntas**: 10 preguntas alternando equipos
-    - **Cache**: 2 horas
+    - **Cache**: 2 horas en Firebase
     """
     result = await trivia_service.generate_trivia(
         team1=payload.team1,
@@ -700,29 +489,31 @@ async def generate_trivia(
     )
     
     return result
-two_hour_cache = TTLCache(ttl_seconds=7200)
-team_seasons_cache = TTLCache(ttl_seconds=7200) 
+
+
+# ===== ENDPOINTS: TEAM STATISTICS =====
+
 @router.get("/team-stats/{team_name}")
 async def get_team_statistics_by_name(
     team_name: str,
-    season: Optional[int] = Query(None, description="Temporada específica (ej: 2024). Si no se especifica, muestra todas disponibles"),
+    season: Optional[int] = Query(None, description="Temporada específica (ej: 2024)"),
     league_name: Optional[str] = Query(None, description="Nombre de la liga (opcional)"),
-    service: FootballAPIService = Depends(get_football_service)
+    force_refresh: bool = Query(False, description="Forzar actualización desde API"),
+    service: FootballFirebaseService = Depends(get_football_service)
 ):
     """
     Obtiene estadísticas de un equipo por nombre.
     
     - **team_name**: Nombre del equipo (ej: "Barcelona")
-    - **season**: Temporada opcional (ej: 2024). Si no se especifica, lista todas las disponibles
-    - **league_name**: Nombre de la liga opcional (ej: "La Liga")
-    
-    Si no se especifica season, retorna info de temporadas disponibles.
-    Si se especifica season, retorna estadísticas de esa temporada.
+    - **season**: Temporada opcional (ej: 2024)
+    - **league_name**: Nombre de la liga opcional
+    - **force_refresh**: Forzar actualización desde API
+    - **Cache**: 2 horas en Firebase
     """
     normalized = team_name.strip().lower()
 
-    # 1. Buscar equipo por nombre
-    team_search = service.search_team_by_name(normalized)
+    # Buscar equipo
+    team_search = service.search_team_by_name(normalized, force_refresh=force_refresh)
 
     if not team_search or team_search.get("results", 0) == 0:
         raise HTTPException(404, f"No se encontró el equipo '{team_name}'")
@@ -733,9 +524,9 @@ async def get_team_statistics_by_name(
     team_logo = team_info["team"].get("logo")
     team_country = team_info["team"].get("country")
 
-    # 2. Obtener temporadas disponibles usando /teams/seasons
+    # Obtener temporadas disponibles
     try:
-        seasons_response = service.request_get("/teams/seasons", params={"team": team_id})
+        seasons_response = service.get_team_seasons(team_id, force_refresh=force_refresh)
         
         if not seasons_response or seasons_response.get("results", 0) == 0:
             raise HTTPException(
@@ -746,12 +537,8 @@ async def get_team_statistics_by_name(
         available_seasons = seasons_response["response"]
         
     except Exception as e:
-        raise HTTPException(
-            500,
-            f"Error al obtener temporadas: {str(e)}"
-        )
+        raise HTTPException(500, f"Error al obtener temporadas: {str(e)}")
 
-    # Si no se especificó season, retornar info de temporadas disponibles
     if season is None:
         return {
             "equipo": {
@@ -764,7 +551,6 @@ async def get_team_statistics_by_name(
             "mensaje": f"Especifica ?season=YYYY para obtener estadísticas. Ejemplo: ?season={available_seasons[-1] if available_seasons else 2024}"
         }
 
-    # Verificar que la temporada solicitada esté disponible
     if season not in available_seasons:
         return {
             "equipo": {
@@ -778,15 +564,8 @@ async def get_team_statistics_by_name(
             "sugerencia": f"Usa una de las temporadas disponibles, por ejemplo: ?season={available_seasons[-1]}"
         }
 
-    # CACHE para temporada específica
-    cache_key = f"team_stats:{normalized}:{season}:{league_name or 'default'}"
-    cached = match_data_cache.get(cache_key)
-    if cached:
-        return {"cached": True, "data": cached}
-
-    # 3. Buscar ligas donde jugó el equipo en esa temporada
+    # Buscar ligas
     try:
-        # Usar /teams con league y season para encontrar todas las ligas
         teams_in_season = service.request_get("/teams", params={
             "id": team_id,
             "season": season
@@ -804,7 +583,6 @@ async def get_team_statistics_by_name(
                 "temporadas_disponibles": sorted(available_seasons, reverse=True)
             }
         
-        # Extraer todas las ligas de esa temporada
         available_leagues = []
         for entry in teams_in_season["response"]:
             league = entry.get("league", {})
@@ -815,22 +593,11 @@ async def get_team_statistics_by_name(
                     "country": league.get("country"),
                     "logo": league.get("logo")
                 })
-        
-        if not available_leagues:
-            return {
-                "equipo": {
-                    "id": team_id,
-                    "nombre": team_real_name,
-                    "logo": team_logo
-                },
-                "error": f"No se encontraron ligas para {team_real_name} en {season}",
-                "temporadas_disponibles": sorted(available_seasons, reverse=True)
-            }
 
     except Exception as e:
         raise HTTPException(500, f"Error al buscar ligas: {str(e)}")
 
-    # 4. Seleccionar liga
+    # Seleccionar liga
     league_id = None
     selected_league = None
     
@@ -846,19 +613,19 @@ async def get_team_statistics_by_name(
             available_names = [l["league_name"] for l in available_leagues]
             raise HTTPException(
                 404,
-                f"No se encontró la liga '{league_name}'. Ligas disponibles en {season}: {', '.join(available_names)}"
+                f"No se encontró la liga '{league_name}'. Ligas disponibles: {', '.join(available_names)}"
             )
     else:
-        # Tomar la primera liga (normalmente la liga doméstica)
         selected_league = available_leagues[0]
         league_id = selected_league["league_id"]
 
-    # 5. Obtener estadísticas
+    # Obtener estadísticas (con cache de Firebase - 2 horas)
     try:
         stats_data = service.get_team_statistics(
             team_id=team_id,
             league_id=league_id,
-            season=season
+            season=season,
+            force_refresh=force_refresh
         )
         
         if not stats_data or stats_data.get("results", 0) == 0:
@@ -877,7 +644,7 @@ async def get_team_statistics_by_name(
     except Exception as e:
         raise HTTPException(500, f"Error al obtener estadísticas: {str(e)}")
 
-    # 6. Formatear respuesta completa
+    # Formatear respuesta
     result = {
         "equipo": {
             "id": team_id,
@@ -907,13 +674,79 @@ async def get_team_statistics_by_name(
                 "nombre": l["league_name"],
                 "pais": l.get("country")
             } for l in available_leagues if l["league_id"] != league_id
-        ]
+        ],
+        "cached_from_firebase": not force_refresh
     }
 
-    # 7. Guardar en caché (2 horas)
-    match_data_cache.set(cache_key, result, ttl=7200)
+    return {"cached": not force_refresh, "data": result}
 
-    return {
-        "cached": False,
-        "data": result
-    }
+
+# Reemplaza el endpoint /stream-events en tus rutas
+
+@router.get("/stream-events/{fixture_id}")
+async def stream_fixture_events(
+    fixture_id: int,
+    poll_interval: float = Query(10.0, description="Intervalo de polling en segundos", ge=5.0, le=60.0),
+    stream_service: StreamService = Depends(get_stream_service)
+):
+    """
+    Stream de eventos en tiempo real para un partido.
+    
+    - **fixture_id**: ID del partido
+    - **poll_interval**: Intervalo de polling (5-60 segundos)
+    - **Keep-alive**: Envía mensajes cada 30 segundos para mantener conexión
+    - **Emite eventos SSE cuando**:
+        - Hay nuevos eventos (goles, tarjetas, etc.)
+        - Cambia el estado del partido (HT, FT, etc.)
+    - **Usa Firebase como cache** con TTL de 60 segundos
+    
+    **Tipos de eventos SSE:**
+    - `ready`: Conexión establecida
+    - `events`: Nuevos eventos detectados
+    - `status`: Solo cambio de estado (sin eventos)
+    - `error`: Error en el procesamiento
+    - `keep-alive`: Comentarios invisibles para mantener conexión
+    
+    **Ejemplo de uso (JavaScript):**
+    ```javascript
+    const eventSource = new EventSource(`/football/stream-events/1379107`);
+    
+    eventSource.addEventListener('ready', (e) => {
+        const data = JSON.parse(e.data);
+        console.log('Conectado:', data);
+    });
+    
+    eventSource.addEventListener('events', (e) => {
+        const data = JSON.parse(e.data);
+        console.log('Nuevos eventos:', data.nuevos);
+        // Actualizar UI con nuevos eventos
+    });
+    
+    eventSource.addEventListener('status', (e) => {
+        const data = JSON.parse(e.data);
+        console.log('Cambio de estado:', data.status);
+        // Actualizar estado del partido en UI
+    });
+    
+    eventSource.addEventListener('error', (e) => {
+        console.error('Error:', e.data);
+    });
+    
+    // Importante: Cerrar conexión cuando termina el partido o no se necesita más
+    // eventSource.close();
+    ```
+    """
+    return StreamingResponse(
+        stream_service.stream_match_events(
+            fixture_id=fixture_id,
+            poll_interval=poll_interval
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # Para NGINX
+            "Content-Type": "text/event-stream",
+            "Transfer-Encoding": "chunked"
+        }
+    )

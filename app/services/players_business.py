@@ -1,127 +1,32 @@
-"""Lógica de negocio para operaciones complejas con jugadores"""
+"""Lógica de negocio para operaciones complejas con jugadores - CON FIREBASE"""
 from typing import Dict, Any, List, Optional
 import json
 import random
 from datetime import datetime, timedelta
 from openai import OpenAI
-from app.services.players_service import PlayersAPIService
+from app.services.players_firebase_service import PlayersFirebaseService
 from app.core.config import get_settings
-from openai import OpenAI
 from app.services.news_search_service import NewsSearchService
 from app.services.embedding_service import EmbeddingService
 import logging
+
 logger = logging.getLogger(__name__)
+
 
 class PlayersBusinessService:
     """Lógica de negocio para operaciones con jugadores"""
     
-    def __init__(self, api_service: PlayersAPIService):
+    def __init__(self, api_service: PlayersFirebaseService):
         self.api_service = api_service
         self.news_service = NewsSearchService()
         self.embedding_service = EmbeddingService()
         self.openai_client = OpenAI()
-    
-    # ... (otros métodos como get_complete_player_info, calculate_totals, etc.)
-    
-    def generate_player_news(self, player_name: str) -> Dict[str, Any]:
-        """
-        Genera un resumen de noticias recientes sobre un jugador
-        usando búsqueda real de Google News + IA para síntesis
+        self.settings = get_settings()
         
-        Args:
-            player_name: Nombre completo del jugador
-            
-        Returns:
-            Dict con párrafo conciso, fecha y fuente principal
-        """
-        try:
-            # 1. Buscar noticias reales en Google News
-            noticias = self.news_service.search_google_news(
-                query=player_name,
-                max_results=5
-            )
-            
-            if not noticias:
-                return {
-                    "jugador": player_name,
-                    "noticia": f"No se encontraron noticias recientes sobre {player_name}.",
-                    "fecha": None,
-                    "fuente": None,
-                    "mensaje": "Sin resultados en Google News"
-                }
-            
-            # 2. Usar solo la primera fuente (más relevante)
-            noticia_principal = noticias[0]
-            
-            # Construir contexto con título y snippet
-            titulo = noticia_principal.get('title', '')
-            snippet = noticia_principal.get('snippet', '')
-            
-            if not snippet or len(snippet) < 50:
-                # Si no hay snippet, usar solo título
-                context = titulo
-            else:
-                context = f"{titulo}. {snippet}"
-            
-            if not context.strip():
-                return {
-                    "jugador": player_name,
-                    "noticia": f"Se encontró una noticia sobre {player_name} pero sin contenido suficiente.",
-                    "fecha": noticia_principal.get('date'),
-                    "fuente": noticia_principal.get('source'),
-                    "link": noticia_principal.get('link'),
-                    "mensaje": "Noticia sin contenido"
-                }
-            
-            # 3. Generar párrafo conciso con GPT
-            
-            prompt = f"""Eres un periodista deportivo colombiano. Basándote ÚNICAMENTE en esta noticia real:
-
-            {context}
-
-            Genera un párrafo corto (máximo 2-3 oraciones) sobre {player_name}.
-
-            REQUISITOS ESTRICTOS:
-            - Máximo 60 palabras
-            - Tono informativo y profesional
-            - NO inventes información que no esté en la fuente
-            - Usa solo la información proporcionada
-            - Sé conciso y directo
-
-            Párrafo:"""
-
-            response = self.openai_client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": "Eres un periodista deportivo conciso y preciso. Solo reportas hechos."},
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=100,
-                temperature=0.2  # Muy baja temperatura para ser más factual
-            )
-            
-            parrafo = response.choices[0].message.content.strip()
-            
-            # 4. Retornar respuesta estructurada con UNA sola fuente
-            noticia_principal = noticias[0]
-            
-            return {
-                "jugador": player_name,
-                "noticia": parrafo,
-                "fecha": noticia_principal.get('date'),
-                "fuente": noticia_principal.get('source'),
-                "link": noticia_principal.get('link')
-            }
-            
-        except Exception as e:
-            logger.error(f"Error generando noticia para {player_name}: {e}")
-            return {
-                "jugador": player_name,
-                "noticia": f"Error al generar noticia: {str(e)}",
-                "fecha": None,
-                "fuente": None,
-                "error": str(e)
-            }
+        # Cache interno para biografías (complementario a Firebase)
+        self.bio_cache = {}
+        self.cache_ttl = timedelta(days=1)
+    
     # ============== CALCULATIONS ==============
     def calculate_totals(self, statistics: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Calcula totales agregados de estadísticas"""
@@ -166,16 +71,24 @@ class PlayersBusinessService:
     def get_complete_player_info(
         self, 
         player_id: int, 
-        season: Optional[int] = None
+        season: Optional[int] = None,
+        force_refresh: bool = False
     ) -> Dict[str, Any]:
-        """Obtiene perfil + estadísticas + temporadas disponibles"""
-        profile = self.api_service.get_player_profile(player_id)
+        """
+        Obtiene perfil + estadísticas + temporadas disponibles
+        
+        OPTIMIZADO CON FIREBASE:
+        - Perfil: cache 7 días
+        - Temporadas: cache 1 día
+        - Estadísticas: cache 1 hora
+        """
+        profile = self.api_service.get_player_profile(player_id, force_refresh)
         
         if not profile:
             return None
         
         player_data = profile.get("player", {})
-        available_seasons = self.api_service.get_available_seasons(player_id)
+        available_seasons = self.api_service.get_available_seasons(player_id, force_refresh)
         
         if not available_seasons:
             return {
@@ -189,7 +102,11 @@ class PlayersBusinessService:
         if season is None:
             season = max(available_seasons)
         
-        stats_data = self.api_service.get_player_statistics(player_id=player_id, season=season)
+        stats_data = self.api_service.get_player_statistics(
+            player_id=player_id, 
+            season=season,
+            force_refresh=force_refresh
+        )
         
         if stats_data.get("results", 0) == 0:
             return {
@@ -228,10 +145,211 @@ class PlayersBusinessService:
             },
             "temporadas_disponibles": sorted(available_seasons, reverse=True)
         }
+    
+    # ============== SEARCH WITH AI FALLBACK ==============
+    def search_with_fallback(
+        self,
+        name: str,
+        season: Optional[int] = None,
+        nationality: Optional[str] = None,
+        force_refresh: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Busca jugador en API, con fallback a IA si no existe. SIEMPRE genera biografía.
         
+        OPTIMIZADO CON FIREBASE:
+        - Búsquedas: cache 1 hora
+        - Estadísticas: cache 1 hora
+        - Temporadas: cache 1 día
+        """
+        search_data = self.api_service.search_players(name, page=1, force_refresh=force_refresh) or {}
+        raw_players = search_data.get("response") or search_data.get("players") or []
         
+        def is_valid_player(entry):
+            if not isinstance(entry, dict):
+                return False
+            pl = entry.get("player") or {}
+            return pl.get("id") is not None and isinstance(pl.get("name"), str)
+        
+        players_list = [p for p in raw_players if is_valid_player(p)]
+        
+        if nationality:
+            nat = nationality.strip().lower()
+            players_list = [
+                p for p in players_list 
+                if (p.get("player", {}).get("nationality") or "").strip().lower() == nat
+            ]
+        
+        if players_list:
+            first = players_list[0]
+            player_data = first.get("player", {})
+            player_id = player_data.get("id")
+            player_name = player_data.get("name")
+            
+            bio = self._generate_quick_bio(player_name)
+            available_seasons = self.api_service.get_available_seasons(player_id, force_refresh)
+            
+            if not available_seasons:
+                response = self._create_minimal_response(player_data, season)
+                response["bio"] = bio
+                return response
+            
+            if season is None:
+                season = max(available_seasons)
+            
+            stats_data = self.api_service.get_player_statistics(
+                player_id=player_id, 
+                season=season,
+                force_refresh=force_refresh
+            )
+            
+            if stats_data.get("results", 0) == 0:
+                response = self._create_minimal_response(player_data, season)
+                response["bio"] = bio
+                return response
+            
+            response_data = stats_data["response"][0]
+            statistics = response_data.get("statistics", [])
+            totals = self.calculate_totals(statistics)
+            
+            return {
+                "jugador": {
+                    "id": player_id,
+                    "nombre": player_name,
+                    "nacionalidad": player_data.get("nationality"),
+                    "edad": player_data.get("age"),
+                    "foto": self.api_service.get_player_photo_url(player_id)
+                },
+                "temporada": season,
+                "goles": totals["total_goals"],
+                "asistencias": totals["total_assists"],
+                "partidos": totals["total_matches"],
+                "minutos": totals["total_minutes"],
+                "rating": totals["average_rating"],
+                "equipos": [
+                    {"nombre": s.get("team", {}).get("name"), "liga": s.get("league", {}).get("name")}
+                    for s in statistics
+                ],
+                "bio": bio
+            }
+        
+        return self._generate_ai_fallback(name, season, nationality)
+    
+    def _create_minimal_response(self, player_data: Dict, season: Optional[int]) -> Dict[str, Any]:
+        """Respuesta mínima cuando no hay estadísticas"""
+        return {
+            "jugador": player_data,
+            "temporada": season or "2024/2025",
+            "goles": 0,
+            "asistencias": 0,
+            "partidos": 0,
+            "minutos": 0,
+            "rating": 6.5,
+            "equipos": []
+        }
+    
+    def _generate_quick_bio(self, player_name: str) -> str:
+        """Genera bio corta con manejo robusto de errores"""
+        try:
+            response = self.openai_client.chat.completions.create(
+                model=self.settings.OPENAI_MODEL_ID,
+                messages=[
+                    {
+                        "role": "system", 
+                        "content": "Eres un experto en fútbol que escribe biografías concisas y precisas."
+                    },
+                    {
+                        "role": "user", 
+                        "content": (
+                            f"Escribe una biografía breve, clara y objetiva del futbolista {player_name}. "
+                            f"Incluye nacionalidad, posición, estilo de juego y un logro destacado. "
+                            f"Máximo 5 líneas, sin introducciones ni relleno."
+                        )
+                    }
+                ],
+                max_tokens=150,
+                temperature=0.6
+            )
+            bio = response.choices[0].message.content.strip()
+            
+            if not bio or len(bio) < 10:
+                return f"{player_name} es un futbolista profesional con destacada trayectoria internacional."
+            
+            return bio
+            
+        except Exception as e:
+            logger.error(f"Error generando bio para {player_name}: {e}")
+            return f"{player_name} es un futbolista profesional con destacada trayectoria internacional."
+    
+    def _generate_ai_fallback(
+        self, 
+        name: str, 
+        season: Optional[int], 
+        nationality: Optional[str]
+    ) -> Dict[str, Any]:
+        """Genera jugador ficticio con IA (SIEMPRE incluye bio)"""
+        prompt = (
+            f"Genera un JSON con estadísticas de {name}. "
+            f"Si existe, usa datos reales; si no, invéntalo coherentemente.\n\n"
+            f"FORMATO:\n"
+            f"{{\n"
+            f"  \"jugador\": {{\"id\": <num>, \"nombre\": \"<n>\", \"nacionalidad\": \"<país>\", \"edad\": <num>, \"foto\": \"<url>\"}},\n"
+            f"  \"temporada\": \"{season or '2024/2025'}\",\n"
+            f"  \"goles\": <num>, \"asistencias\": <num>, \"partidos\": <num>, \"minutos\": <num>, \"rating\": <num>,\n"
+            f"  \"equipos\": [{{\"nombre\": \"<equipo>\", \"liga\": \"<liga>\"}}],\n"
+            f"  \"bio\": \"<biografía de máximo 5 líneas sobre el jugador>\"\n"
+            f"}}\n\n"
+            f"IMPORTANTE: La bio debe incluir nacionalidad, posición, estilo de juego y un logro destacado.\n"
+            f"Solo JSON, sin texto extra."
+        )
+        
+        try:
+            response = self.openai_client.chat.completions.create(
+                model=self.settings.OPENAI_MODEL_ID,
+                messages=[
+                    {"role": "system", "content": "Responde únicamente JSON válido con todos los campos requeridos."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=500,
+                temperature=0.2
+            )
+            
+            content = response.choices[0].message.content.strip()
+            if content.startswith("```"):
+                content = content.replace("```json", "").replace("```", "").strip()
+            
+            parsed = json.loads(content)
+            
+            if "bio" not in parsed or not parsed["bio"]:
+                parsed["bio"] = self._generate_quick_bio(name)
+            
+            return parsed
+            
+        except Exception as e:
+            logger.error(f"Error generando AI fallback para {name}: {e}")
+            bio = self._generate_quick_bio(name)
+            
+            return {
+                "jugador": {
+                    "id": random.randint(100000, 999999),
+                    "nombre": name,
+                    "nacionalidad": nationality or "Desconocida",
+                    "edad": random.randint(18, 34),
+                    "foto": "https://media.api-sports.io/football/players/default.png"
+                },
+                "temporada": season or "2024/2025",
+                "goles": random.randint(0, 20),
+                "asistencias": random.randint(0, 12),
+                "partidos": random.randint(5, 38),
+                "minutos": random.randint(300, 3200),
+                "rating": round(random.uniform(6.0, 7.9), 2),
+                "equipos": [{"nombre": "Club Desconocido", "liga": "Liga Desconocida"}],
+                "bio": bio
+            }
+    
+    # ============== BIO GENERATION ==============
     def generate_player_bio(self, player_name: str, team: str) -> Dict[str, Any]:
-        """Genera biografía con cache"""
+        """Genera biografía con cache interno (complementario a Firebase)"""
         cache_key = (player_name.lower(), team.lower())
         
         if cache_key in self.bio_cache:
@@ -271,197 +389,140 @@ class PlayersBusinessService:
             return {"player": player_name, "team": team, "bio": bio, "cached": False}
         
         except Exception as e:
+            logger.error(f"Error generando bio para {player_name}: {e}")
             return {"error": str(e)}
     
-    # ============== SEARCH WITH AI FALLBACK ==============
-    def search_with_fallback(
-        self,
-        name: str,
-        season: Optional[int] = None,
-        nationality: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """Busca jugador en API, con fallback a IA si no existe. SIEMPRE genera biografía."""
-        search_data = self.api_service.search_players(name, page=1) or {}
-        raw_players = search_data.get("response") or search_data.get("players") or []
+    # ============== NEWS GENERATION (CON FIREBASE CACHE) ==============
+    def generate_player_news(self, player_name: str) -> Dict[str, Any]:
+        """
+        Genera un resumen de noticias recientes sobre un jugador
+        usando búsqueda real de Google News + IA para síntesis
         
-        def is_valid_player(entry):
-            if not isinstance(entry, dict):
-                return False
-            pl = entry.get("player") or {}
-            return pl.get("id") is not None and isinstance(pl.get("name"), str)
-        
-        players_list = [p for p in raw_players if is_valid_player(p)]
-        
-        if nationality:
-            nat = nationality.strip().lower()
-            players_list = [
-                p for p in players_list 
-                if (p.get("player", {}).get("nationality") or "").strip().lower() == nat
-            ]
-        
-        # Si encontramos jugadores, retornar el primero
-        if players_list:
-            first = players_list[0]
-            player_data = first.get("player", {})
-            player_id = player_data.get("id")
-            player_name = player_data.get("name")
-            
-            # ✅ GENERAR BIOGRAFÍA SIEMPRE (antes de verificar estadísticas)
-            bio = self._generate_quick_bio(player_name)
-            
-            available_seasons = self.api_service.get_available_seasons(player_id)
-            if not available_seasons:
-                response = self._create_minimal_response(player_data, season)
-                response["bio"] = bio  # ✅ Agregar bio
-                return response
-            
-            if season is None:
-                season = max(available_seasons)
-            
-            stats_data = self.api_service.get_player_statistics(player_id=player_id, season=season)
-            if stats_data.get("results", 0) == 0:
-                response = self._create_minimal_response(player_data, season)
-                response["bio"] = bio  # ✅ Agregar bio
-                return response
-            
-            response_data = stats_data["response"][0]
-            statistics = response_data.get("statistics", [])
-            totals = self.calculate_totals(statistics)
-            
-            return {
-                "jugador": {
-                    "id": player_id,
-                    "nombre": player_name,
-                    "nacionalidad": player_data.get("nationality"),
-                    "edad": player_data.get("age"),
-                    "foto": self.api_service.get_player_photo_url(player_id)
-                },
-                "temporada": season,
-                "goles": totals["total_goals"],
-                "asistencias": totals["total_assists"],
-                "partidos": totals["total_matches"],
-                "minutos": totals["total_minutes"],
-                "rating": totals["average_rating"],
-                "equipos": [
-                    {"nombre": s.get("team", {}).get("name"), "liga": s.get("league", {}).get("name")}
-                    for s in statistics
-                ],
-                "bio": bio  # ✅ Siempre incluye bio
-            }
-        
-        # Fallback: generar con IA (ya incluye bio dentro)
-        return self._generate_ai_fallback(name, season, nationality)
-    
-    def _create_minimal_response(self, player_data: Dict, season: Optional[int]) -> Dict[str, Any]:
-        """Respuesta mínima cuando no hay estadísticas (sin bio, se agrega después)"""
-        return {
-            "jugador": player_data,
-            "temporada": season or "2024/2025",
-            "goles": 0,
-            "asistencias": 0,
-            "partidos": 0,
-            "minutos": 0,
-            "rating": 6.5,
-            "equipos": []
-        }
-    
-    def _generate_quick_bio(self, player_name: str) -> str:
-        """Genera bio corta con manejo robusto de errores"""
+        CACHE EN FIREBASE: 1 día (24 horas)
+        - Si existe cache válido → Retorna inmediatamente
+        - Si expiró o no existe → Genera nuevo y guarda en Firebase
+        - Auto-eliminación: Firebase elimina automáticamente después de 24h
+        """
         try:
-            response = self.openai_client.chat.completions.create(
-                model=self.settings.OPENAI_MODEL_ID,
-                messages=[
-                    {
-                        "role": "system", 
-                        "content": "Eres un experto en fútbol que escribe biografías concisas y precisas."
-                    },
-                    {
-                        "role": "user", 
-                        "content": (
-                            f"Escribe una biografía breve, clara y objetiva del futbolista {player_name}. "
-                            f"Incluye nacionalidad, posición, estilo de juego y un logro destacado. "
-                            f"Máximo 5 líneas, sin introducciones ni relleno."
-                        )
-                    }
-                ],
-                max_tokens=150,
-                temperature=0.6
+            # ✅ NIVEL 1: Intentar obtener desde Firebase
+            cached_news = self.api_service.get_player_news_from_cache(player_name)
+            
+            if cached_news:
+                # Agregar indicador de cache
+                cached_news["_from_cache"] = True
+                cached_news["_cached_at"] = cached_news.get("fecha_consulta", "Desconocida")
+                logger.info(f"✓ Noticias de '{player_name}' servidas desde Firebase cache")
+                return cached_news
+            
+            # ✅ NIVEL 2: Generar nueva noticia
+            logger.info(f"⚡ Generando noticia fresca para '{player_name}'")
+            
+            # 1. Buscar noticias reales en Google News
+            noticias = self.news_service.search_google_news(
+                query=player_name,
+                max_results=5
             )
-            bio = response.choices[0].message.content.strip()
             
-            # Validar que la bio no esté vacía
-            if not bio or len(bio) < 10:
-                return f"{player_name} es un futbolista profesional con destacada trayectoria internacional."
+            if not noticias:
+                result = {
+                    "jugador": player_name,
+                    "noticia": f"No se encontraron noticias recientes sobre {player_name}.",
+                    "fecha": None,
+                    "fuente": None,
+                    "link": None,
+                    "mensaje": "Sin resultados en Google News",
+                    "fecha_consulta": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    "_from_cache": False
+                }
+                
+                # Guardar en Firebase incluso sin resultados (evita búsquedas repetidas)
+                self.api_service.set_player_news_cache(player_name, result)
+                return result
             
-            return bio
+            # 2. Usar solo la primera fuente (más relevante)
+            noticia_principal = noticias[0]
             
-        except Exception as e:
-            # Fallback si OpenAI falla
-            return f"{player_name} es un futbolista profesional con destacada trayectoria internacional."
-    
-    def _generate_ai_fallback(
-        self, 
-        name: str, 
-        season: Optional[int], 
-        nationality: Optional[str]
-    ) -> Dict[str, Any]:
-        """Genera jugador ficticio con IA (SIEMPRE incluye bio)"""
-        prompt = (
-            f"Genera un JSON con estadísticas de {name}. "
-            f"Si existe, usa datos reales; si no, invéntalo coherentemente.\n\n"
-            f"FORMATO:\n"
-            f"{{\n"
-            f"  \"jugador\": {{\"id\": <num>, \"nombre\": \"<n>\", \"nacionalidad\": \"<país>\", \"edad\": <num>, \"foto\": \"<url>\"}},\n"
-            f"  \"temporada\": \"{season or '2024/2025'}\",\n"
-            f"  \"goles\": <num>, \"asistencias\": <num>, \"partidos\": <num>, \"minutos\": <num>, \"rating\": <num>,\n"
-            f"  \"equipos\": [{{\"nombre\": \"<equipo>\", \"liga\": \"<liga>\"}}],\n"
-            f"  \"bio\": \"<biografía de máximo 5 líneas sobre el jugador>\"\n"
-            f"}}\n\n"
-            f"IMPORTANTE: La bio debe incluir nacionalidad, posición, estilo de juego y un logro destacado.\n"
-            f"Solo JSON, sin texto extra."
-        )
-        
-        try:
+            titulo = noticia_principal.get('title', '')
+            snippet = noticia_principal.get('snippet', '')
+            
+            if not snippet or len(snippet) < 50:
+                context = titulo
+            else:
+                context = f"{titulo}. {snippet}"
+            
+            if not context.strip():
+                result = {
+                    "jugador": player_name,
+                    "noticia": f"Se encontró una noticia sobre {player_name} pero sin contenido suficiente.",
+                    "fecha": noticia_principal.get('date'),
+                    "fuente": noticia_principal.get('source'),
+                    "link": noticia_principal.get('link'),
+                    "mensaje": "Noticia sin contenido",
+                    "fecha_consulta": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    "_from_cache": False
+                }
+                
+                self.api_service.set_player_news_cache(player_name, result)
+                return result
+            
+            # 3. Generar párrafo conciso con GPT
+            prompt = f"""Eres un periodista deportivo colombiano. Basándote ÚNICAMENTE en esta noticia real:
+
+{context}
+
+Genera un párrafo corto (máximo 2-3 oraciones) sobre {player_name}.
+
+REQUISITOS ESTRICTOS:
+- Máximo 60 palabras
+- Tono informativo y profesional
+- NO inventes información que no esté en la fuente
+- Usa solo la información proporcionada
+- Sé conciso y directo
+
+Párrafo:"""
+
             response = self.openai_client.chat.completions.create(
-                model=self.settings.OPENAI_MODEL_ID,
+                model="gpt-4o-mini",
                 messages=[
-                    {"role": "system", "content": "Responde únicamente JSON válido con todos los campos requeridos."},
+                    {"role": "system", "content": "Eres un periodista deportivo conciso y preciso. Solo reportas hechos."},
                     {"role": "user", "content": prompt}
                 ],
-                max_tokens=500,  # Aumentado para incluir bio
+                max_tokens=100,
                 temperature=0.2
             )
             
-            content = response.choices[0].message.content.strip()
-            if content.startswith("```"):
-                content = content.replace("```json", "").replace("```", "").strip()
+            parrafo = response.choices[0].message.content.strip()
             
-            parsed = json.loads(content)
+            # 4. Construir resultado
+            result = {
+                "jugador": player_name,
+                "noticia": parrafo,
+                "fecha": noticia_principal.get('date'),
+                "fuente": noticia_principal.get('source'),
+                "link": noticia_principal.get('link'),
+                "fecha_consulta": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                "_from_cache": False
+            }
             
-            # ✅ Validar que tenga bio, si no, agregarla
-            if "bio" not in parsed or not parsed["bio"]:
-                parsed["bio"] = self._generate_quick_bio(name)
+            # ✅ GUARDAR EN FIREBASE (TTL: 24 horas)
+            self.api_service.set_player_news_cache(player_name, result)
+            logger.info(f"✓ Noticia de '{player_name}' guardada en Firebase (expira en 24h)")
             
-            return parsed
+            return result
             
         except Exception as e:
-            # ✅ Fallback FINAL con bio incluida
-            bio = self._generate_quick_bio(name)
+            logger.error(f"❌ Error generando noticia para {player_name}: {e}")
             
-            return {
-                "jugador": {
-                    "id": random.randint(100000, 999999),
-                    "nombre": name,
-                    "nacionalidad": nationality or "Desconocida",
-                    "edad": random.randint(18, 34),
-                    "foto": "https://media.api-sports.io/football/players/default.png"
-                },
-                "temporada": season or "2024/2025",
-                "goles": random.randint(0, 20),
-                "asistencias": random.randint(0, 12),
-                "partidos": random.randint(5, 38),
-                "minutos": random.randint(300, 3200),
-                "rating": round(random.uniform(6.0, 7.9), 2),
-                "equipos": [{"nombre": "Club Desconocido", "liga": "Liga Desconocida"}],
-                "bio": bio  # ✅ Siempre incluye bio
+            error_result = {
+                "jugador": player_name,
+                "noticia": f"Error al generar noticia: {str(e)}",
+                "fecha": None,
+                "fuente": None,
+                "link": None,
+                "error": str(e),
+                "fecha_consulta": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                "_from_cache": False
             }
+            
+            # No guardar errores en cache
+            return error_result

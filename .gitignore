@@ -237,3 +237,8 @@ huggingface/
 # YOLO cache
 runs/
 yolo_cache/
+
+# ===================================
+# Credenciales sensibles
+# ===================================
+firebaseKey.json

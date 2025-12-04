@@ -2,6 +2,9 @@
 from typing import Optional, Dict, Any, List
 from pydantic import BaseModel, Field
 from datetime import datetime
+from app.services.football_firebase_service import FootballFirebaseService
+from app.services.firebase_service import firebase_service
+from app.core.config import get_settings
 
 class Team(BaseModel):
     """Información de un equipo"""
@@ -335,8 +338,114 @@ class SimpleMatchInfo(BaseModel):
     equipos: Dict[str, str]
     marcador: Dict[str, int]
     estado: str
-    minuto: int
+    minuto: Optional[int] = None
 
 class LiveMatchesBasicResponse(BaseModel):
     total: int
     matches: List[SimpleMatchInfo]
+
+
+class TeamStatsRequest(BaseModel):
+    """Parámetros para buscar estadísticas de equipo"""
+    team: str = Field(..., description="Nombre del equipo")
+    league: int = Field(..., description="ID de la liga")
+    season: int = Field(..., description="Temporada (YYYY)")
+
+class PartidosStats(BaseModel):
+    """Estadísticas de partidos"""
+    jugados: int
+    ganados: int
+    empatados: int
+    perdidos: int
+
+class GolesStats(BaseModel):
+    """Estadísticas de goles"""
+    favor: int
+    contra: int
+    diferencia: Optional[int] = None
+    promedio_favor: str
+    promedio_contra: str
+
+class TeamStatisticsResponse(BaseModel):
+    """Respuesta completa de estadísticas de equipo"""
+    equipo: Dict[str, Any]
+    liga: Dict[str, Any]
+    estadisticas: Dict[str, Any]
+
+class TeamSeasonStats(BaseModel):
+    """Estadísticas de temporada de un equipo"""
+    forma_actual: str
+    partidos: Dict[str, Dict[str, int]]
+    goles: Dict[str, Dict[str, Any]]
+    rachas_maximas: Dict[str, int]
+    porterias_cero: Dict[str, int]
+    sin_anotar: Dict[str, int]
+
+class SeasonStatsComplete(BaseModel):
+    """Estadísticas de temporada completas para ambos equipos"""
+    temporada: int
+    liga_id: int
+    local: Optional[TeamSeasonStats] = None
+    visitante: Optional[TeamSeasonStats] = None
+
+class CompleteMatchResponse(BaseModel):
+    """Respuesta completa de un partido con TODAS las estadísticas"""
+    fixture_id: int
+    fecha: str
+    liga: str
+    pais: str
+    equipos: TeamInfoWithLogos
+    marcador: Score
+    estado: str
+    minuto: Optional[int]
+    eventos: List[Event]
+    estadisticas_partido: Dict[str, Dict[str, Any]]  # Renombrado para claridad
+    lineups: List[SimpleLineup]
+    lineups_disponibles: bool
+    estadisticas_temporada: SeasonStatsComplete  # NUEVO
+
+class TeamSeasonStatsSimple(BaseModel):
+    """Estadísticas simplificadas de temporada"""
+    partidos_jugados: int
+    ganados: int
+    empatados: int
+    perdidos: int
+    goles_favor: int
+    goles_contra: int
+    diferencia_goles: int
+    forma_reciente: str  # Últimos 5 partidos, ej: "WWDLW"
+    porterias_cero: int
+    rachas: Dict[str, int]
+
+class TeamColors(BaseModel):
+    """Colores del equipo extraídos del logo"""
+    primary: str  # Color principal en HEX (ej: "#FF0000")
+    secondary: str  # Color secundario en HEX (ej: "#0000FF")
+
+class TeamCompleteInfo(BaseModel):
+    """Información completa de un equipo en el partido"""
+    nombre: str
+    logo: Optional[str] = None
+    colores: TeamColors  # 🎨 NUEVO
+    estadisticas_temporada: Optional[TeamSeasonStatsSimple] = None
+
+class TeamsCompleteInfo(BaseModel):
+    """Información de ambos equipos"""
+    local: TeamCompleteInfo
+    visitante: TeamCompleteInfo
+
+class CompleteMatchResponse(BaseModel):
+    """Respuesta completa de un partido con colores"""
+    fixture_id: int
+    fecha: str
+    liga: str
+    pais: str
+    temporada: int
+    equipos: TeamsCompleteInfo
+    marcador: Score
+    estado: str
+    minuto: Optional[int]
+    eventos: List[Event]
+    estadisticas_partido: Dict[str, Dict[str, Any]]
+    lineups: List[SimpleLineup]
+    lineups_disponibles: bool

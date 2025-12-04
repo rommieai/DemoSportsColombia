@@ -6,8 +6,8 @@ from app.api.routers import analyze, health, ask, validate, football, products, 
 # ===== IMPORTS DE LOGGING =====
 from app.core.logging_config import setup_logging
 from app.middleware import RequestLoggingMiddleware, PerformanceMonitoringMiddleware
-from app.middleware.response_logger import ResponseLoggerMiddleware  # ✅ NUEVO
-from app.api.routers import log_viewer  # ✅ NUEVO - Endpoints de logs
+from app.middleware.response_logger import ResponseLoggerMiddleware 
+from app.api.routers import log_viewer  
 import logging
 
 # Configurar logging al inicio
@@ -33,29 +33,7 @@ def create_app() -> FastAPI:
     # 2. Middleware de monitoreo de rendimiento
     app.add_middleware(PerformanceMonitoringMiddleware, slow_request_threshold=5.0)
     logger.info("✓ Performance monitoring middleware activado (umbral: 5.0s)")
-    
-    # ✅ 3. NUEVO: Middleware para guardar responses
-    app.add_middleware(
-        ResponseLoggerMiddleware,
-        db_path="logs/api_responses.db",
-        json_logs_dir="logs/json",
-        enable_json_logs=True,
-        monitored_prefixes=["/football", "/players", "/products"]
-    )
-    logger.info("✓ Response Logger activado (guardando en SQLite + JSON)")
-    logger.info("  → Monitoreando: /football, /players, /products")
-    
-    # 4. CORS middleware
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["GET","POST","PUT","DELETE","OPTIONS"],
-        allow_headers=["*"],
-    )
-    logger.info(f"✓ CORS configurado para orígenes: {s.CORS_ORIGINS}")
-    
-    # ============== ROUTERS ==============
+        # ============== ROUTERS ==============
     
     app.include_router(analyze.router)
     app.include_router(health.router)
