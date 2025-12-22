@@ -750,3 +750,4 @@ async def stream_fixture_events(
             "Transfer-Encoding": "chunked"
         }
     )
+

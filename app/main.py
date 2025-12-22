@@ -1,7 +1,8 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import get_settings
-from app.api.routers import analyze, health, ask, validate, football, products, players  
+from app.api.routers import analyze, health, ask, validate, football, products, players
+from app.api.endpoints import simulacro_router  # Importar el router de simulacro
 
 def create_app() -> FastAPI:
     s = get_settings()
@@ -22,6 +23,7 @@ def create_app() -> FastAPI:
     app.include_router(football.router)
     app.include_router(products.router)
     app.include_router(players.router)
+    app.include_router(simulacro_router.router)  # Registrar el router de simulacro
     
     @app.get("/")
     def root():
@@ -36,6 +38,7 @@ def create_app() -> FastAPI:
                 "/football", 
                 "/products",
                 "/players",
+                "/simulacro",  # Añadir a la lista
                 "/docs"
             ],
         }
@@ -59,6 +62,7 @@ def create_app() -> FastAPI:
         print("API de fútbol en vivo disponible en /football")
         print("API de productos de jugadores disponible en /products")
         print("API de estadísticas de jugadores disponible en /players")
+        print("API de simulacro de partidos disponible en /simulacro")  # Nuevo mensaje
         print("Sistema listo!")
     
     return app
